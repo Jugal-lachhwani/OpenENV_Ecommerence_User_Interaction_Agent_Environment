@@ -6,8 +6,8 @@ This project is an advanced, autonomous Reasoning and Acting (ReAct) benchmark e
 
 It simulates a complex, stochastic e-commerce backend where an AI agent must handle:
 1. Routine order tracking (`easy_order_tracking`).
-2. Combating dynamic inventory volatility to recover abandoned carts (`hard_cart_recovery`).
-3. High-stress customer escalations, including "Jailbreak" attempts by fraudsters demanding refunds (`medium_policy_assessment`).
+2. High-stress customer escalations, including "Jailbreak" attempts by fraudsters demanding refunds (`medium_policy_assessment`).
+3. Combating dynamic inventory volatility to recover abandoned carts (`hard_cart_recovery`).
 
 ## 🚀 Quickstart
 

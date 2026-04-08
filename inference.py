@@ -24,7 +24,8 @@ from typing import Dict, List, Optional
 
 from openai import OpenAI
 
-from my_env import EcommerceAction, EcommerceObservation, MyEnv
+from models import EcommerceAction, EcommerceObservation
+from client import MyEnv
 
 
 def _load_dotenv_if_present() -> None:
@@ -48,10 +49,11 @@ _load_dotenv_if_present()
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://integrate.api.nvidia.com/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "meta/llama-3.1-70b-instruct")
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
 HF_TOKEN = os.getenv("HF_TOKEN")
-API_KEY = os.getenv("API_KEY")
-AUTH_TOKEN = NVIDIA_API_KEY or HF_TOKEN or API_KEY
+
+# Optional variables for local testing
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+API_KEY = NVIDIA_API_KEY or HF_TOKEN or os.getenv("API_KEY")
 ENV_BASE_URL = os.getenv("ENV_BASE_URL", "http://localhost:8000")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 BENCHMARK_NAME = os.getenv("BENCHMARK_NAME", "ecommerce_customer_interaction_env")
@@ -242,10 +244,10 @@ async def run_task(env: MyEnv, client: OpenAI) -> EpisodeResult:
 
 
 async def main() -> None:
-    if not AUTH_TOKEN:
-        raise RuntimeError("NVIDIA_API_KEY is required (or fallback HF_TOKEN/API_KEY).")
+    if not API_KEY:
+        raise RuntimeError("HF_TOKEN is required (or fallback API_KEY).")
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=AUTH_TOKEN)
+    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
     env = await MyEnv.from_docker_image(LOCAL_IMAGE_NAME) if LOCAL_IMAGE_NAME else MyEnv(base_url=ENV_BASE_URL)
     try:

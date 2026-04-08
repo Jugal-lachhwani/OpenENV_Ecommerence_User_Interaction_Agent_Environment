@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecommerce-customer-interaction-env"
+version = "0.1.0"
+description = "E-commerce customer interaction optimization environment for OpenEnv"
+requires-python = ">=3.10"
+dependencies = [
+    "openenv-core[core]>=0.2.1",
+    "openai>=1.35.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.24.0",
+    "pydantic>=2.0.0"
+]
+
+[project.scripts]
+server = "my_env.server.app:main"
+
+[tool.setuptools]
+include-package-data = true
+packages = ["my_env", "my_env.server"]
+package-dir = { "my_env" = "my_env" }
