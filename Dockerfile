@@ -30,12 +30,12 @@ RUN if ! command -v uv >/dev/null 2>&1; then \
     
 # Install dependencies using root requirements.txt or pyproject
 RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ -f requirements.txt ]; then \
-        uv pip install --system -r requirements.txt; \
-    elif [ -f my_env/uv.lock ]; then \
-        cd my_env && uv sync --frozen --no-install-project --no-editable && cd ..; \
+    if [ -f uv.lock ]; then \
+        uv sync --frozen --no-install-project --no-editable; \
+    elif [ -f requirements.txt ]; then \
+        uv venv .venv && .venv/bin/uv pip install -r requirements.txt; \
     else \
-        uv pip install --system fastapi uvicorn openai openenv-core[core]>=0.2.1; \
+        uv venv .venv && .venv/bin/uv pip install fastapi uvicorn openai openenv-core[core]>=0.2.1; \
     fi
 
 # Final runtime stage
