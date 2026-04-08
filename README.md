@@ -1,3 +1,13 @@
+---
+title: Ecommerce Agent Env
+emoji: 🛒
+colorFrom: blue
+colorTo: green
+sdk: docker
+pinned: false
+tags:
+  - openenv
+---
 # 🛒 E-Commerce Customer Interaction RL Agent
 
 **ML InnovateX Hackathon Project**
