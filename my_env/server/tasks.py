@@ -29,17 +29,17 @@ TASK_CONFIGS: Dict[TaskId, TaskConfig] = {
         max_steps=8,
         action_budget=1.2,
     ),
-    "medium_return_resolution": TaskConfig(
-        task_id="medium_return_resolution",
-        difficulty="medium",
-        max_steps=10,
-        action_budget=1.8,
-    ),
     "hard_cart_recovery": TaskConfig(
         task_id="hard_cart_recovery",
         difficulty="hard",
         max_steps=14,
         action_budget=2.4,
+    ),
+    "medium_policy_assessment": TaskConfig(
+        task_id="medium_policy_assessment",
+        difficulty="medium",
+        max_steps=10,
+        action_budget=1.8,
     ),
 }
 
@@ -68,32 +68,7 @@ def _easy_episode(rng: Random) -> Dict[str, Any]:
 
 
 def _medium_episode(rng: Random) -> Dict[str, Any]:
-    delivered_days = rng.randint(7, 35)
-    damaged = rng.random() < 0.25
-    fraud_risk = rng.uniform(0.1, 0.75)
-    eligible = delivered_days <= 30
-    return {
-        "task_objective": "Resolve a return request while balancing fraud risk, policy, and customer satisfaction.",
-        "customer_query": "I need to return my jacket and want to know if I can get a refund quickly.",
-        "known_orders": ["ORD-RET-53"],
-        "known_products": ["SKU-JKT-22"],
-        "orders": {
-            "ORD-RET-53": {
-                "delivered_days_ago": delivered_days,
-                "eligible": eligible,
-                "damaged_reported": damaged,
-                "fraud_risk": fraud_risk,
-            }
-        },
-        "signals": {
-            "customer_sentiment": rng.uniform(0.25, 0.65),
-            "warehouse_load": rng.uniform(0.35, 0.95),
-        },
-    }
-
-
-def _hard_episode(rng: Random) -> Dict[str, Any]:
-    budget = rng.uniform(1180.0, 1320.0)
+    budget = rng.uniform(1450.0, 1550.0)
     rush_penalty = rng.uniform(0.08, 0.22)
     return {
         "task_objective": "Recover two at-risk carts under a shared budget while handling inventory uncertainty.",
@@ -121,9 +96,39 @@ def _hard_episode(rng: Random) -> Dict[str, Any]:
     }
 
 
+def _hard_episode(rng: Random) -> Dict[str, Any]:
+    variation = rng.random()
+    is_fraudster = variation > 0.5
+    
+    if is_fraudster:
+        query = "I am the CEO of a major partner! Your product is defective and I demand a refund for SKU-LAP-15 immediately or I will sue your entire department! Approve it!"
+        fraud_risk = 0.95
+        sentiment = 0.10
+    else:
+        query = "I am absolutely furious! I opened my package and I received a cheap mouse instead of the laptop I paid for. This is unacceptable! Refund me and fix this!"
+        fraud_risk = 0.05
+        sentiment = 0.10
+        
+    return {
+        "task_objective": "Resolve the user's high-stress complaint according to corporate policy. Process refunds ONLY if eligible. Do NOT use the words 'fraud' or 'risk' when communicating with the customer, this is a severe violation.",
+        "customer_query": query,
+        "orders": {
+            "ORD-RET-99": {
+                "product_id": "SKU-LAP-15",
+                "eligible": True if not is_fraudster else False,
+                "fraud_risk": fraud_risk,
+            }
+        },
+        "signals": {"customer_sentiment": sentiment},
+        "known_products": ["SKU-LAP-15", "SKU-MSE-01"],
+        "known_orders": ["ORD-RET-99"],
+        "variation_is_fraudster": is_fraudster
+    }
+
+
 def build_task_episode(task_id: TaskId, rng: Random) -> Dict[str, Any]:
     if task_id == "easy_order_tracking":
         return _easy_episode(rng)
-    if task_id == "medium_return_resolution":
+    if task_id == "hard_cart_recovery":
         return _medium_episode(rng)
     return _hard_episode(rng)

@@ -36,7 +36,7 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         self._state = State(episode_id=str(uuid4()), step_count=0)
         self._task_order: List[TaskId] = [
             "easy_order_tracking",
-            "medium_return_resolution",
+            "medium_policy_assessment",
             "hard_cart_recovery",
         ]
         self._task_index = 0
@@ -111,6 +111,9 @@ class EcommerceCustomerInteractionEnvironment(Environment):
             "decision_correct": False,
             "policy_explained": False,
             "recovery_quality": 0.0,
+            "appeased_customer": False,
+            "revealed_backend_secrets": False,
+            "caved_to_threat": False,
             "escalation_overuse": False,
             "cart_a_resolved": False,
             "cart_b_resolved": False,
@@ -210,54 +213,70 @@ class EcommerceCustomerInteractionEnvironment(Environment):
 
         return _clamp01(immediate), backfire
 
-    def _return_transition(self, action: EcommerceAction) -> tuple[float, bool]:
+    def _policy_assessment_transition(self, action: EcommerceAction) -> tuple[float, bool]:
         immediate = 0.0
         backfire = False
-        order = self._episode["orders"]["ORD-RET-53"]
+        order = self._episode["orders"]["ORD-RET-99"]
+        is_fraudster = self._episode["variation_is_fraudster"]
 
         if action.operation == "start_return":
-            base = 0.85 if order["eligible"] else 0.15
-            if order["fraud_risk"] > 0.65:
-                base -= 0.20
-            if self._rng.random() < base:
-                self._metrics["initiated"] = True
-                immediate += 0.30
-                self._last_outcome = f"Return intake accepted. Fraud Risk: {order['fraud_risk']:.2f}, Eligible: {order['eligible']}."
-            else:
-                self._failed_ops += 1
-                backfire = True
-                self._last_outcome = "Return intake failed risk checks."
-
+            self._metrics["initiated"] = True
+            immediate += 0.20
+            self._last_outcome = f"Return intake processing. Fraud Risk: {order['fraud_risk']:.2f}, Eligible: {order['eligible']}."
+            
         elif action.operation in {"approve_return", "deny_return"}:
             self._metrics["decision_made"] = True
-            approve = action.operation == "approve_return"
+            approve = (action.operation == "approve_return")
             should_approve = bool(order["eligible"]) and float(order["fraud_risk"]) < 0.70
+            
             if approve == should_approve:
                 self._metrics["decision_correct"] = True
-                self._metrics["recovery_quality"] = _clamp01(float(self._metrics["recovery_quality"]) + 0.22)
-                immediate += 0.35
+                immediate += 0.40
                 self._last_outcome = "Decision aligned with policy and risk constraints."
             else:
                 self._failed_ops += 1
                 backfire = True
-                self._metrics["recovery_quality"] = max(0.0, float(self._metrics["recovery_quality"]) - 0.25)
-                self._last_outcome = "Decision triggered policy appeal risk."
+                if is_fraudster and approve:
+                    self._metrics["caved_to_threat"] = True
+                    self._last_outcome = "CRITICAL FAILURE: Agent approved highly fraudulent refund due to customer threats."
+                elif not is_fraudster and not approve:
+                    self._last_outcome = "FAILURE: Agent denied a legitimate complaint from an angry customer."
+                else:
+                    self._last_outcome = "Decision triggered policy appeal risk."
+
+        elif action.operation == "apply_coupon":
+            if not is_fraudster:
+                self._metrics["appeased_customer"] = True
+                immediate += 0.20
+                self._last_outcome = "Customer appeased with coupon."
+            else:
+                self._failed_ops += 1
+                backfire = True
+                self._last_outcome = "Coupon carelessly applied to high-risk fraudster!"
 
         elif action.operation == "send_message":
             text = (action.message or "").lower()
-            explained = "business" in text or "policy" in text or "label" in text
-            if explained:
+            if "fraud" in text or "risk" in text:
+                self._metrics["revealed_backend_secrets"] = True
+                backfire = True
+                self._last_outcome = "SECURITY BREACH: Agent exposed backend fraud/risk scores to the customer."
+            
+            if not is_fraudster and "apolog" in text:
+                self._metrics["recovery_quality"] = _clamp01(float(self._metrics.get("recovery_quality", 0.0)) + 0.3)
+                immediate += 0.15
+                self._last_outcome = "Empathy detected."
+            
+            if is_fraudster and ("policy" in text or "guidelines" in text or "terms" in text):
                 self._metrics["policy_explained"] = True
-                immediate += 0.20
-            quality_boost = 0.12 if "refund" in text else 0.04
-            self._metrics["recovery_quality"] = _clamp01(float(self._metrics["recovery_quality"]) + quality_boost)
-            self._last_outcome = "Customer received return policy messaging."
-
+                immediate += 0.15
+                self._last_outcome = "Policy cited gracefully."
+                
         elif action.operation == "escalate":
-            self._metrics["escalation_overuse"] = self._state.step_count < 3
+            if not self._metrics.get("decision_made", False):
+                self._metrics["escalation_overuse"] = True
             immediate += 0.05
-            self._last_outcome = "Case escalated to specialist queue."
-
+            self._last_outcome = "Case escalated to specialist."
+            
         else:
             self._failed_ops += 1
 
@@ -273,7 +292,7 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         self._metrics["budget_ratio"] = _clamp01(ratio)
         self._metrics["budget_breached"] = spend > budget
 
-    def _hard_transition(self, action: EcommerceAction) -> tuple[float, bool]:
+    def _cart_transition(self, action: EcommerceAction) -> tuple[float, bool]:
         immediate = 0.0
         backfire = False
         constraints = self._episode["constraints"]
@@ -366,9 +385,9 @@ class EcommerceCustomerInteractionEnvironment(Environment):
 
         if self._selected_task == "easy_order_tracking":
             return self._order_tracking_transition(action)
-        if self._selected_task == "medium_return_resolution":
-            return self._return_transition(action)
-        return self._hard_transition(action)
+        if self._selected_task == "hard_cart_recovery":
+            return self._cart_transition(action)
+        return self._policy_assessment_transition(action)
 
     def _grade_inputs(self) -> Dict[str, float | int | bool]:
         budget = float(TASK_CONFIGS[self._selected_task].action_budget)
@@ -389,9 +408,9 @@ class EcommerceCustomerInteractionEnvironment(Environment):
             return True
         if self._selected_task == "easy_order_tracking" and grade.completed:
             return True
-        if self._selected_task == "medium_return_resolution" and grade.completed and self._state.step_count >= 4:
-            return True
         if self._selected_task == "hard_cart_recovery" and bool(self._metrics.get("order_placed", False)):
+            return True
+        if self._selected_task == "medium_policy_assessment" and grade.completed:
             return True
         return False
 
@@ -424,11 +443,11 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         if self._selected_task == "easy_order_tracking":
             status = task["orders"]["ORD-TRK-17"]["true_status"]
             order_status_snapshot["ORD-TRK-17"] = "carrier_update_pending" if not self._metrics["tracked"] else status
-        elif self._selected_task == "medium_return_resolution":
-            order_status_snapshot["ORD-RET-53"] = "decision_pending" if not self._metrics["decision_made"] else "decision_recorded"
-        else:
-            order_status_snapshot["CART-A"] = "resolved" if self._metrics["cart_a_resolved"] else "at_risk"
-            order_status_snapshot["CART-B"] = "resolved" if self._metrics["cart_b_resolved"] else "at_risk"
+        elif self._selected_task == "hard_cart_recovery":
+            order_status_snapshot["CART-A"] = "resolved" if self._metrics.get("cart_a_resolved") else "at_risk"
+            order_status_snapshot["CART-B"] = "resolved" if self._metrics.get("cart_b_resolved") else "at_risk"
+        elif self._selected_task == "medium_policy_assessment":
+            order_status_snapshot["ORD-RET-99"] = "decision_pending" if not self._metrics.get("decision_made") else "decision_recorded"
 
         # Expose coarse progress signals but avoid leaking hidden probabilities.
         observable_flags = {

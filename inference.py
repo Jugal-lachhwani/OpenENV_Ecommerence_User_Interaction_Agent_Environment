@@ -114,15 +114,23 @@ def parse_action(content: str) -> tuple[Optional[str], Optional[Dict[str, object
     thought_match = re.search(r'<thought>(.*?)</thought>', content, re.DOTALL | re.IGNORECASE)
     thought = thought_match.group(1).strip() if thought_match else None
 
-    match = re.search(r'\{.*\}', content, re.DOTALL)
-    if not match:
-        return thought, None
-    try:
-        parsed = json.loads(match.group(0))
-        if isinstance(parsed, dict):
-            return thought, parsed
-    except Exception:
-        return thought, None
+    # Strip the thought block so its internal braces don't crash the JSON regex
+    if thought_match:
+        content = content.replace(thought_match.group(0), "")
+
+    # Always find the outermost valid boundaries for JSON objects
+    first_brace = content.find('{')
+    last_brace = content.rfind('}')
+    
+    if first_brace != -1 and last_brace != -1 and last_brace >= first_brace:
+        json_str = content[first_brace:last_brace+1]
+        try:
+            parsed = json.loads(json_str)
+            if isinstance(parsed, dict):
+                return thought, parsed
+        except Exception:
+            pass
+            
     return thought, None
 
 
