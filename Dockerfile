@@ -48,7 +48,7 @@ WORKDIR /app
 # But if there's a venv, copy it
 COPY --from=builder /app/env /app/env
 
-ENV PATH="/app/.venv/bin:$PATH"
+ENV PATH="/app/env/.venv/bin:$PATH"
 ENV PYTHONPATH="/app/env:$PYTHONPATH"
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
