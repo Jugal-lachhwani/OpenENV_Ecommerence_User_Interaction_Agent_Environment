@@ -8,7 +8,7 @@ from typing import Dict
 
 
 def _clamp01(value: float) -> float:
-    return max(0.0, min(1.0, value))
+    return max(0.01, min(0.99, value))
 
 
 @dataclass
