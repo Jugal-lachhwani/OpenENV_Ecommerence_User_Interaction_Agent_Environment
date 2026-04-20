@@ -11,8 +11,6 @@ tags:
 ---
 # 🛒 E-Commerce Customer Interaction RL Agent
 
-**ML InnovateX Hackathon Project**
-
 This project is an advanced, autonomous Reasoning and Acting (ReAct) benchmark environment built for Reinforcement Learning (RL) training using the OpenEnv standard. 
 
 It acts as a dynamic simulator of a complex, stochastic e-commerce backend platform. The environment tests if a Large Language Model (LLM) agent can successfully navigate uncertainty, strict business constraints, and volatile customer behaviors without human intervention.

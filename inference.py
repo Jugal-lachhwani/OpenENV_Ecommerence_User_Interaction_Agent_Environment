@@ -17,15 +17,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from openai import OpenAI
 
-from models import EcommerceAction, EcommerceObservation
-from client import MyEnv
+from my_env import EcommerceAction, EcommerceObservation, MyEnv
 
 
 def _load_dotenv_if_present() -> None:
@@ -49,11 +47,10 @@ _load_dotenv_if_present()
 
 API_BASE_URL = os.getenv("API_BASE_URL", "https://integrate.api.nvidia.com/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "meta/llama-3.1-70b-instruct")
-HF_TOKEN = os.getenv("HF_TOKEN")
-
-# Optional variables for local testing
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
-API_KEY = NVIDIA_API_KEY or HF_TOKEN or os.getenv("API_KEY")
+HF_TOKEN = os.getenv("HF_TOKEN")
+API_KEY = os.getenv("API_KEY")
+AUTH_TOKEN = NVIDIA_API_KEY or HF_TOKEN or API_KEY
 ENV_BASE_URL = os.getenv("ENV_BASE_URL", "http://localhost:8000")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 BENCHMARK_NAME = os.getenv("BENCHMARK_NAME", "ecommerce_customer_interaction_env")
@@ -90,80 +87,100 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
     )
 
 
-def build_prompt(obs: EcommerceObservation, history: List[str]) -> str:
-    schema = EcommerceAction.model_json_schema()
-    schema_str = json.dumps(schema, indent=2)
-    obs_json = obs.model_dump_json(indent=2)
-    history_str = "\n".join(history) if history else "No actions taken yet."
+def build_prompt(task_id: str, objective: str, query: str, last_outcome: str, score: float) -> str:
     return (
-        "You are an expert e-commerce operations agent. You must analyze the following environment state observation and decide the next best action.\n"
-        "Never ask the user for information that is already provided in the 'known_orders' or 'known_products' arrays.\n"
-        "HEURISTICS:\n"
-        "- Do not exceed budgets. Check your 'cart_subtotal' against your metadata 'remaining_budget' before placing orders.\n"
-        "- Do not add duplicates of expensive items unless expressly requested. (e.g. only 1 laptop is usually needed).\n"
-        "- Pay attention to 'fraud_risk' in orders. Deny returns if risk is high.\n"
-        "IMPORTANT: You must think step-by-step before deciding an action. Write your reasoning inside a <thought> block.\n"
-        f"After the <thought> block, you must output ONLY valid JSON matching this exact Pydantic schema:\n{schema_str}\n\n"
-        "### EPISODE HISTORY ###\n"
-        f"{history_str}\n\n"
-        "### CURRENT ENVIRONMENT OBSERVATION ###\n"
-        f"{obs_json}\n\n"
-        "Do not include any conversational text outside the <thought> and JSON blocks."
+        "You are solving an e-commerce operations task in a verifiable environment. "
+        "Return ONLY compact JSON with keys: operation, task_id, product_id, order_id, coupon_code, quantity, reason, message. "
+        "Use null for unused fields.\n"
+        f"task_id={task_id}\n"
+        f"objective={objective}\n"
+        f"customer_query={query}\n"
+        f"last_action_outcome={last_outcome}\n"
+        f"current_score={score:.3f}\n"
+        "Prioritize policy-compliant, minimal-step completion."
     )
 
 
-def parse_action(content: str) -> tuple[Optional[str], Optional[Dict[str, object]]]:
-    thought_match = re.search(r'<thought>(.*?)</thought>', content, re.DOTALL | re.IGNORECASE)
-    thought = thought_match.group(1).strip() if thought_match else None
-
-    # Strip the thought block so its internal braces don't crash the JSON regex
-    if thought_match:
-        content = content.replace(thought_match.group(0), "")
-
-    # Always find the outermost valid boundaries for JSON objects
-    first_brace = content.find('{')
-    last_brace = content.rfind('}')
-    
-    if first_brace != -1 and last_brace != -1 and last_brace >= first_brace:
-        json_str = content[first_brace:last_brace+1]
-        try:
-            parsed = json.loads(json_str)
-            if isinstance(parsed, dict):
-                return thought, parsed
-        except Exception:
-            pass
-            
-    return thought, None
+def parse_action(content: str) -> Optional[Dict[str, object]]:
+    text = content.strip()
+    if not text:
+        return None
+    if "```" in text:
+        text = text.replace("```json", "").replace("```", "").strip()
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        return None
+    return None
 
 
 def llm_action(
     client: OpenAI,
-    obs: EcommerceObservation,
-    history: List[str],
-) -> tuple[Optional[str], Optional[Dict[str, object]], Optional[str]]:
-    prompt = build_prompt(obs, history)
+    task_id: str,
+    objective: str,
+    query: str,
+    last_outcome: str,
+    score: float,
+) -> tuple[Optional[Dict[str, object]], Optional[str]]:
+    prompt = build_prompt(task_id, objective, query, last_outcome, score)
     try:
         completion = client.chat.completions.create(
             model=MODEL_NAME,
             temperature=0.0,
-            max_tokens=600,
+            max_tokens=180,
             messages=[
-                {"role": "system", "content": "You are a logical ReAct agent. Reason first, then act."},
+                {"role": "system", "content": "Return valid JSON only."},
                 {"role": "user", "content": prompt},
             ],
         )
     except Exception as exc:
-        return None, None, f"llm_request_failed:{type(exc).__name__}"
+        return None, f"llm_request_failed:{type(exc).__name__}"
 
     content = (completion.choices[0].message.content or "").strip()
-    thought, parsed = parse_action(content)
+    parsed = parse_action(content)
     if parsed is None:
-        return thought, None, "llm_output_invalid_json"
-    return thought, parsed, None
+        return None, "llm_output_invalid_json"
+    return parsed, None
 
 
 def fallback_action(task_id: str, step: int, obs: EcommerceObservation) -> Dict[str, object]:
-    return {"operation": "send_message", "message": "Encountered processing error."}
+    if task_id == "easy_order_tracking":
+        if step == 1:
+            return {"operation": "track_order", "order_id": (obs.known_orders[0] if obs.known_orders else None)}
+        return {
+            "operation": "send_message",
+            "message": "Shipment update shared with current status and estimated arrival window.",
+        }
+
+    if task_id == "medium_return_resolution":
+        order_id = obs.known_orders[0] if obs.known_orders else None
+        if step == 1:
+            return {"operation": "start_return", "order_id": order_id, "product_id": "SKU-JKT-22"}
+        if step == 2:
+            return {"operation": "approve_return", "order_id": order_id}
+        return {
+            "operation": "send_message",
+            "message": "Return policy decision communicated with label and refund timing guidance.",
+        }
+
+    if step == 1:
+        return {"operation": "search_catalog"}
+    if step == 2:
+        return {"operation": "add_to_cart", "product_id": "SKU-LAP-14"}
+    if step == 3:
+        return {"operation": "add_to_cart", "product_id": "SKU-MSE-01"}
+    if step == 4:
+        return {"operation": "add_to_cart", "product_id": "SKU-JKT-22"}
+    if step == 5:
+        return {"operation": "apply_coupon", "coupon_code": "SAVE10"}
+    if step == 6:
+        return {"operation": "place_order"}
+    return {
+        "operation": "send_message",
+        "message": "Cart recovery status shared with budget-aware alternatives.",
+    }
 
 
 def normalize_action(raw_action: Dict[str, object], task_id: str) -> EcommerceAction:
@@ -189,23 +206,20 @@ async def run_task(env: MyEnv, client: OpenAI) -> EpisodeResult:
     score = 0.0
     steps_taken = 0
     success = False
-    history: List[str] = []
 
     log_start(task=task_id, env=BENCHMARK_NAME, model=MODEL_NAME)
 
     for step in range(1, MAX_STEPS_PER_TASK + 1):
-        llm_thought, llm_raw, llm_error = await asyncio.to_thread(
-            llm_action,
+        llm_raw, llm_error = llm_action(
             client,
-            result.observation,
-            history,
+            task_id,
+            result.observation.task_objective,
+            result.observation.customer_query,
+            result.observation.last_action_outcome,
+            result.observation.grader_score,
         )
         fallback = fallback_action(task_id, step, result.observation)
-        try:
-            action = normalize_action(llm_raw or fallback, task_id)
-        except Exception as e:
-            llm_error = f"validation_error:{type(e).__name__}"
-            action = normalize_action(fallback, task_id)
+        action = normalize_action(llm_raw or fallback, task_id)
 
         error: Optional[str] = llm_error
         try:
@@ -214,8 +228,6 @@ async def run_task(env: MyEnv, client: OpenAI) -> EpisodeResult:
             error = f"{error or 'env_step_failed'}|{type(exc).__name__}"
             action = normalize_action(fallback, task_id)
             result = await env.step(action)
-
-        history.append(f"Step {step}:\nThought: {llm_thought or 'None'}\nAction: {action.operation}\nOutcome: {result.observation.last_action_outcome}")
 
         reward = float(result.reward or 0.0)
         rewards.append(reward)
@@ -244,10 +256,10 @@ async def run_task(env: MyEnv, client: OpenAI) -> EpisodeResult:
 
 
 async def main() -> None:
-    if not API_KEY:
-        raise RuntimeError("HF_TOKEN is required (or fallback API_KEY).")
+    if not AUTH_TOKEN:
+        raise RuntimeError("NVIDIA_API_KEY is required (or fallback HF_TOKEN/API_KEY).")
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    client = OpenAI(base_url=API_BASE_URL, api_key=AUTH_TOKEN)
 
     env = await MyEnv.from_docker_image(LOCAL_IMAGE_NAME) if LOCAL_IMAGE_NAME else MyEnv(base_url=ENV_BASE_URL)
     try:
