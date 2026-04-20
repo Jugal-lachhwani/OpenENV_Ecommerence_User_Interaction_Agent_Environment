@@ -339,7 +339,6 @@ class EcommerceCustomerInteractionEnvironment(Environment):
                 backfire = True
 
         elif action.operation == "place_order":
-            self._update_hard_budget_ratio(budget)
             if not self._metrics["cart_a_resolved"] or not self._metrics["cart_b_resolved"]:
                 self._failed_ops += 1
                 self._backfires += 1
@@ -381,6 +380,7 @@ class EcommerceCustomerInteractionEnvironment(Environment):
     def _operation_transition(self, action: EcommerceAction) -> tuple[float, bool]:
         if action.operation == "set_task":
             self._failed_ops += 1
+            self._last_outcome = "Cannot set_task during an active episode. Tasks are initialized upon reset."
             return 0.0, True
 
         if self._selected_task == "easy_order_tracking":

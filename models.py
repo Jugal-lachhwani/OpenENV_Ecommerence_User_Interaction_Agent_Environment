@@ -52,7 +52,7 @@ class EcommerceAction(Action):
     operation: OperationType = Field(..., description="The business operation to execute")
     task_id: Optional[TaskId] = Field(
         default=None,
-        description="Task to activate when operation is set_task",
+        description="Task to activate when operation is set_task (handled only during environment setup/reset)",
     )
     product_id: Optional[str] = Field(default=None, description="Catalog product identifier")
     order_id: Optional[str] = Field(default=None, description="Order identifier")
