@@ -154,7 +154,7 @@ def fallback_action(task_id: str, step: int, obs: EcommerceObservation) -> Dict[
             "message": "Shipment update shared with current status and estimated arrival window.",
         }
 
-    if task_id == "medium_return_resolution":
+    if task_id == "hard_policy_assessment":
         order_id = obs.known_orders[0] if obs.known_orders else None
         if step == 1:
             return {"operation": "start_return", "order_id": order_id, "product_id": "SKU-JKT-22"}

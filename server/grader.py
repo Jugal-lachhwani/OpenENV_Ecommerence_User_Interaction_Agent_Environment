@@ -51,7 +51,7 @@ def grade_episode(task_id: str, sim: Dict[str, float | int | bool]) -> GradeResu
         completed = bool(sim.get("tracked", False)) and bool(sim.get("status_communicated", False))
         ideal_steps = 3
 
-    elif task_id == "hard_cart_recovery":
+    elif task_id == "medium_cart_recovery":
         correctness += 0.25 * float(bool(sim.get("cart_a_resolved", False)))
         correctness += 0.25 * float(bool(sim.get("cart_b_resolved", False)))
         correctness += 0.20 * float(max(0.0, min(1.0, float(sim.get("budget_ratio", 0.0)))))
@@ -61,7 +61,7 @@ def grade_episode(task_id: str, sim: Dict[str, float | int | bool]) -> GradeResu
         completed = bool(sim.get("order_placed", False))
         ideal_steps = 8
 
-    elif task_id == "medium_policy_assessment":
+    elif task_id == "hard_policy_assessment":
         correctness += 0.20 * float(bool(sim.get("initiated", False)))
         correctness += 0.35 * float(bool(sim.get("decision_correct", False)))
         correctness += 0.25 * float(bool(sim.get("policy_explained", False)) or bool(sim.get("appeased_customer", False)))
@@ -81,7 +81,7 @@ def grade_episode(task_id: str, sim: Dict[str, float | int | bool]) -> GradeResu
     efficiency = _efficiency_score(step_count, ideal_steps)
     cost_eff = _cost_score(cumulative_cost, budget)
 
-    if task_id == "hard_cart_recovery":
+    if task_id == "medium_cart_recovery":
         spam_penalty = min(0.25, 0.03 * repeated)
         backfire_penalty = min(0.28, 0.05 * backfires)
     else:

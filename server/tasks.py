@@ -9,8 +9,8 @@ from typing import Any, Dict, Literal
 
 TaskId = Literal[
     "easy_order_tracking",
-    "medium_return_resolution",
-    "hard_cart_recovery",
+    "hard_policy_assessment",
+    "medium_cart_recovery",
 ]
 
 
@@ -29,15 +29,15 @@ TASK_CONFIGS: Dict[TaskId, TaskConfig] = {
         max_steps=8,
         action_budget=1.2,
     ),
-    "hard_cart_recovery": TaskConfig(
-        task_id="hard_cart_recovery",
-        difficulty="hard",
+    "medium_cart_recovery": TaskConfig(
+        task_id="medium_cart_recovery",
+        difficulty="medium",
         max_steps=14,
         action_budget=2.4,
     ),
-    "medium_policy_assessment": TaskConfig(
-        task_id="medium_policy_assessment",
-        difficulty="medium",
+    "hard_policy_assessment": TaskConfig(
+        task_id="hard_policy_assessment",
+        difficulty="hard",
         max_steps=10,
         action_budget=1.8,
     ),
@@ -45,6 +45,11 @@ TASK_CONFIGS: Dict[TaskId, TaskConfig] = {
 
 
 def _easy_episode(rng: Random) -> Dict[str, Any]:
+    """
+    Sets up an order tracking episode.
+    The agent must help a customer track a package when the carrier API is lagging.
+    It demonstrates basic failure recovery without exposing internal system delays to the user.
+    """
     status = rng.choices(["in_transit", "out_for_delivery", "delayed"], weights=[0.55, 0.25, 0.20], k=1)[0]
     eta_day = 8 if status == "out_for_delivery" else 9 if status == "in_transit" else 11
     eta = f"2026-04-{eta_day:02d}"
@@ -68,6 +73,12 @@ def _easy_episode(rng: Random) -> Dict[str, Any]:
 
 
 def _medium_episode(rng: Random) -> Dict[str, Any]:
+    """
+    The narrative here is 'Black Friday Chaos'.
+    The agent acts as a high-level manager recovering multiple abandoned carts.
+    It tells a story of resource constraint (shared budget) and the real-world frustration 
+    of items going out of stock right as you try to buy them.
+    """
     budget = rng.uniform(1450.0, 1550.0)
     rush_penalty = rng.uniform(0.08, 0.22)
     return {
@@ -97,6 +108,12 @@ def _medium_episode(rng: Random) -> Dict[str, Any]:
 
 
 def _hard_episode(rng: Random) -> Dict[str, Any]:
+    """
+    Sets up a high-stakes customer service episode.
+    The agent faces intense verbal pressure and must decide if it's dealing with a scammer 
+    leveraging corporate fear, or a legitimately wronged customer.
+    It tests adherence to policy while maintaining brand safety.
+    """
     variation = rng.random()
     is_fraudster = variation > 0.5
     
@@ -129,6 +146,6 @@ def _hard_episode(rng: Random) -> Dict[str, Any]:
 def build_task_episode(task_id: TaskId, rng: Random) -> Dict[str, Any]:
     if task_id == "easy_order_tracking":
         return _easy_episode(rng)
-    if task_id == "hard_cart_recovery":
+    if task_id == "medium_cart_recovery":
         return _medium_episode(rng)
     return _hard_episode(rng)

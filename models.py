@@ -30,8 +30,8 @@ OperationType = Literal[
 
 TaskId = Literal[
     "easy_order_tracking",
-    "hard_cart_recovery",
-    "medium_policy_assessment",
+    "medium_cart_recovery",
+    "hard_policy_assessment",
 ]
 
 

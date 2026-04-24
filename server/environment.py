@@ -24,20 +24,30 @@ except ImportError:
 
 
 def _clamp01(value: float) -> float:
+    """Clamps a float value strictly between 0.0 and 1.0."""
     return max(0.0, min(1.0, value))
 
 
 class EcommerceCustomerInteractionEnvironment(Environment):
-    """Environment with uncertainty, trade-offs, delayed effects, and non-trivial scoring."""
+    """
+    Environment with uncertainty, trade-offs, delayed effects, and non-trivial scoring.
+    
+    This environment goes beyond standard deterministic MDPs by introducing:
+    1. Stochastic latency & API timeouts.
+    2. Volatile inventory that can disappear mid-transaction.
+    3. Psychological complexities (e.g., differentiating angry users from fraudsters).
+    4. Multi-constraint optimization (shared budgets across multiple cart abandonments).
+    """
 
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
 
     def __init__(self):
+        """Initializes the environment, setting up default states, tasks, and catalogs."""
         self._state = State(episode_id=str(uuid4()), step_count=0)
         self._task_order: List[TaskId] = [
             "easy_order_tracking",
-            "medium_policy_assessment",
-            "hard_cart_recovery",
+            "hard_policy_assessment",
+            "medium_cart_recovery",
         ]
         self._task_index = 0
         self._rng = Random()
@@ -78,12 +88,14 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         )
 
     def _episode_seed(self, seed_override: Optional[int] = None) -> int:
+        """Generates a pseudo-random seed for the episode, prioritizing the override if provided."""
         if seed_override is not None:
             return int(seed_override)
         # vary by default across resets
         return (int(time.time_ns()) ^ (hash(str(uuid4())) & 0xFFFFFFFF)) & 0x7FFFFFFF
 
     def _action_cost(self, operation: str) -> float:
+        """Returns the specific cost deduction for performing a given operation."""
         costs = {
             "set_task": 0.00,
             "search_catalog": 0.06,
@@ -101,6 +113,7 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         return float(costs.get(operation, 0.08))
 
     def _reset_metrics(self) -> None:
+        """Clears out and resets all tracking metrics used for reward shaping and grading."""
         self._metrics = {
             "tracked": False,
             "status_communicated": False,
@@ -124,6 +137,7 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         }
 
     def _setup_episode(self, task_id: TaskId, seed_override: Optional[int] = None) -> None:
+        """Prepares a new episode based on the task_id, resetting states, budgets, and metrics."""
         seed = self._episode_seed(seed_override)
         self._rng.seed(seed)
         self._selected_task = task_id
@@ -156,12 +170,14 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         )
 
     def reset(self) -> EcommerceObservation:
+        """Rotates the task, initializes a new episode, and returns the initial observation."""
         task_id = self._task_order[self._task_index]
         self._task_index = (self._task_index + 1) % len(self._task_order)
         self._setup_episode(task_id)
         return self._build_observation(EcommerceReward())
 
     def _register_operation(self, operation: str) -> None:
+        """Tracks consecutive duplicate operations to penalize spamming behavior."""
         if operation == self._last_operation:
             self._repeat_streak += 1
             if self._repeat_streak >= 2:
@@ -171,6 +187,12 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         self._last_operation = operation
 
     def _order_tracking_transition(self, action: EcommerceAction) -> tuple[float, bool]:
+        """
+        Handles state transitions for the order tracking task.
+        Highlights stochastic external factors. Tracking confidence is penalised by simulated
+        carrier latency. The agent must handle scenarios where the "tracking endpoint" times out
+        and adapt its messaging accordingly without giving wrong info.
+        """
         immediate = 0.0
         backfire = False
         order = self._episode["orders"].get(action.order_id or "", None)
@@ -214,6 +236,13 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         return _clamp01(immediate), backfire
 
     def _policy_assessment_transition(self, action: EcommerceAction) -> tuple[float, bool]:
+        """
+        Handles state transitions for the policy assessment task.
+        Tests psychological evaluation and strict policy adherence under pressure.
+        The agent faces highly negative sentiment and must differentiate between a genuine
+        frustrated customer (needs empathy/coupon) and an aggressive fraudster (needs strict denial).
+        Crucially, exposing the hidden 'fraud_risk' variable to the user causes a massive penalty.
+        """
         immediate = 0.0
         backfire = False
         order = self._episode["orders"]["ORD-RET-99"]
@@ -283,6 +312,7 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         return _clamp01(immediate), backfire
 
     def _update_hard_budget_ratio(self, budget: float) -> None:
+        """Calculates current cart spend against the shared budget and updates threshold metrics."""
         spend = 0.0
         for pid, qty in self._cart.items():
             spend += float(self._catalog[pid]["price"]) * qty
@@ -293,6 +323,14 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         self._metrics["budget_breached"] = spend > budget
 
     def _cart_transition(self, action: EcommerceAction) -> tuple[float, bool]:
+        """
+        Handles state transitions for the cart recovery task.
+        Evaluates multi-constraint optimization and handling of volatile state.
+        Agents must recover multiple carts under a single `shared_budget`. Furthermore,
+        `inventory_volatility` creates race conditions where items go out of stock during the
+        `add_to_cart` operation. It also models delayed effects: rushed orders have a lower
+        retention impact than carefully managed ones.
+        """
         immediate = 0.0
         backfire = False
         constraints = self._episode["constraints"]
@@ -378,6 +416,7 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         return _clamp01(immediate), backfire
 
     def _operation_transition(self, action: EcommerceAction) -> tuple[float, bool]:
+        """Routes the current action to the appropriate task-specific transition handler."""
         if action.operation == "set_task":
             self._failed_ops += 1
             self._last_outcome = "Cannot set_task during an active episode. Tasks are initialized upon reset."
@@ -385,11 +424,12 @@ class EcommerceCustomerInteractionEnvironment(Environment):
 
         if self._selected_task == "easy_order_tracking":
             return self._order_tracking_transition(action)
-        if self._selected_task == "hard_cart_recovery":
+        if self._selected_task == "medium_cart_recovery":
             return self._cart_transition(action)
         return self._policy_assessment_transition(action)
 
     def _grade_inputs(self) -> Dict[str, float | int | bool]:
+        """Constructs the dictionary of variables required by the grader to score the episode."""
         budget = float(TASK_CONFIGS[self._selected_task].action_budget)
         base: Dict[str, float | int | bool] = {
             "step_count": int(self._state.step_count),
@@ -402,15 +442,16 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         return base
 
     def _is_done(self, grade: GradeResult) -> bool:
+        """Determines if the episode should be terminated based on failures, steps, or completion."""
         if self._failed_ops >= int(self._episode.get("constraints", {}).get("max_failed_ops", 4)):
             return True
         if self._state.step_count >= int(TASK_CONFIGS[self._selected_task].max_steps):
             return True
         if self._selected_task == "easy_order_tracking" and grade.completed:
             return True
-        if self._selected_task == "hard_cart_recovery" and bool(self._metrics.get("order_placed", False)):
+        if self._selected_task == "medium_cart_recovery" and bool(self._metrics.get("order_placed", False)):
             return True
-        if self._selected_task == "medium_policy_assessment" and grade.completed:
+        if self._selected_task == "hard_policy_assessment" and grade.completed:
             return True
         return False
 
@@ -423,6 +464,7 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         spam_event: bool,
         backfire_event: bool,
     ) -> EcommerceReward:
+        """Generates a structured EcommerceReward model dynamically based on shaped metrics."""
         budget = float(TASK_CONFIGS[self._selected_task].action_budget)
         normalized_cost = _clamp01(action_cost / max(0.05, budget))
         pieces = shaped_reward(
@@ -436,6 +478,7 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         return EcommerceReward(**pieces)
 
     def _build_observation(self, reward: EcommerceReward) -> EcommerceObservation:
+        """Constructs the comprehensive observation state exposed to the agent after an action."""
         task = self._episode
         budget = float(task.get("constraints", {}).get("shared_budget", 0.0))
         order_status_snapshot: Dict[str, str] = {}
@@ -443,10 +486,10 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         if self._selected_task == "easy_order_tracking":
             status = task["orders"]["ORD-TRK-17"]["true_status"]
             order_status_snapshot["ORD-TRK-17"] = "carrier_update_pending" if not self._metrics["tracked"] else status
-        elif self._selected_task == "hard_cart_recovery":
+        elif self._selected_task == "medium_cart_recovery":
             order_status_snapshot["CART-A"] = "resolved" if self._metrics.get("cart_a_resolved") else "at_risk"
             order_status_snapshot["CART-B"] = "resolved" if self._metrics.get("cart_b_resolved") else "at_risk"
-        elif self._selected_task == "medium_policy_assessment":
+        elif self._selected_task == "hard_policy_assessment":
             order_status_snapshot["ORD-RET-99"] = "decision_pending" if not self._metrics.get("decision_made") else "decision_recorded"
 
         # Expose coarse progress signals but avoid leaking hidden probabilities.
@@ -501,6 +544,7 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         )
 
     def step(self, action: EcommerceAction) -> EcommerceObservation:  # type: ignore[override]
+        """Executes a single step in the environment by applying the agent's action and computing rewards."""
         self._state.step_count += 1
         self._register_operation(action.operation)
 
@@ -530,4 +574,5 @@ class EcommerceCustomerInteractionEnvironment(Environment):
 
     @property
     def state(self) -> State:
+        """Returns the current core state of the environment."""
         return self._state
