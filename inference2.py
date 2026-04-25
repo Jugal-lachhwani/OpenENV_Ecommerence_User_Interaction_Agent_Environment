@@ -17,6 +17,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+
+# Fix for OpenBLAS memory allocation crashes on Windows
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -88,16 +92,24 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
     )
 
 
-def build_prompt(task_id: str, objective: str, query: str, last_outcome: str, score: float) -> str:
+def build_prompt(obs: EcommerceObservation) -> str:
     return (
         "You are solving an e-commerce operations task in a verifiable environment. "
         "Return ONLY compact JSON with keys: operation, task_id, product_id, order_id, coupon_code, quantity, reason, message. "
         "Use null for unused fields.\n"
-        f"task_id={task_id}\n"
-        f"objective={objective}\n"
-        f"customer_query={query}\n"
-        f"last_action_outcome={last_outcome}\n"
-        f"current_score={score:.3f}\n"
+        f"ALLOWED_OPERATIONS: {', '.join(obs.allowed_operations)}\n"
+        f"task_id={obs.task_id}\n"
+        f"objective={obs.task_objective}\n"
+        f"customer_query={obs.customer_query}\n"
+        f"last_action_outcome={obs.last_action_outcome}\n"
+        f"current_score={obs.grader_score:.3f}\n"
+        f"known_products={obs.known_products}\n"
+        f"known_orders={obs.known_orders}\n"
+        f"cart={obs.cart}\n"
+        f"cart_subtotal={obs.cart_subtotal}\n"
+        f"coupon_applied={obs.coupon_applied}\n"
+        f"order_status_snapshot={obs.order_status_snapshot}\n"
+        f"task_flags={obs.task_flags}\n"
         "Prioritize policy-compliant, minimal-step completion."
     )
 
@@ -119,13 +131,9 @@ def parse_action(content: str) -> Optional[Dict[str, object]]:
 
 def llm_action(
     client: OpenAI,
-    task_id: str,
-    objective: str,
-    query: str,
-    last_outcome: str,
-    score: float,
+    obs: EcommerceObservation,
 ) -> tuple[Optional[Dict[str, object]], Optional[str]]:
-    prompt = build_prompt(task_id, objective, query, last_outcome, score)
+    prompt = build_prompt(obs)
     try:
         completion = client.chat.completions.create(
             model=MODEL_NAME,
@@ -145,43 +153,6 @@ def llm_action(
         return None, "llm_output_invalid_json"
     return parsed, None
 
-
-def fallback_action(task_id: str, step: int, obs: EcommerceObservation) -> Dict[str, object]:
-    if task_id == "easy_order_tracking":
-        if step == 1:
-            return {"operation": "track_order", "order_id": (obs.known_orders[0] if obs.known_orders else None)}
-        return {
-            "operation": "send_message",
-            "message": "Shipment update shared with current status and estimated arrival window.",
-        }
-
-    if task_id == "hard_policy_assessment":
-        order_id = obs.known_orders[0] if obs.known_orders else None
-        if step == 1:
-            return {"operation": "start_return", "order_id": order_id, "product_id": "SKU-JKT-22"}
-        if step == 2:
-            return {"operation": "approve_return", "order_id": order_id}
-        return {
-            "operation": "send_message",
-            "message": "Return policy decision communicated with label and refund timing guidance.",
-        }
-
-    if step == 1:
-        return {"operation": "search_catalog"}
-    if step == 2:
-        return {"operation": "add_to_cart", "product_id": "SKU-LAP-14"}
-    if step == 3:
-        return {"operation": "add_to_cart", "product_id": "SKU-MSE-01"}
-    if step == 4:
-        return {"operation": "add_to_cart", "product_id": "SKU-JKT-22"}
-    if step == 5:
-        return {"operation": "apply_coupon", "coupon_code": "SAVE10"}
-    if step == 6:
-        return {"operation": "place_order"}
-    return {
-        "operation": "send_message",
-        "message": "Cart recovery status shared with budget-aware alternatives.",
-    }
 
 
 def normalize_action(raw_action: Dict[str, object], task_id: str) -> EcommerceAction:
@@ -213,22 +184,20 @@ async def run_task(env: MyEnv, client: OpenAI) -> EpisodeResult:
     for step in range(1, MAX_STEPS_PER_TASK + 1):
         llm_raw, llm_error = llm_action(
             client,
-            task_id,
-            result.observation.task_objective,
-            result.observation.customer_query,
-            result.observation.last_action_outcome,
-            result.observation.grader_score,
+            result.observation,
         )
-        fallback = fallback_action(task_id, step, result.observation)
-        action = normalize_action(llm_raw or fallback, task_id)
+        if llm_raw is None:
+            llm_raw = {"operation": "send_message", "message": "LLM failed to output valid JSON"}
+            llm_error = "llm_parsing_error"
 
         error: Optional[str] = llm_error
         try:
+            action = normalize_action(llm_raw, task_id)
             result = await env.step(action)
         except Exception as exc:
             error = f"{error or 'env_step_failed'}|{type(exc).__name__}"
-            action = normalize_action(fallback, task_id)
-            result = await env.step(action)
+            log_step(step, "CRITICAL_FAILURE", 0.0, True, error)
+            break
 
         reward = float(result.reward or 0.0)
         rewards.append(reward)
