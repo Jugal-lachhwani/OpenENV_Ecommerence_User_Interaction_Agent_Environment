@@ -46,8 +46,11 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         self._state = State(episode_id=str(uuid4()), step_count=0)
         self._task_order: List[TaskId] = [
             "easy_order_tracking",
-            "hard_policy_assessment",
+            "easy_wishlist_browse",
             "medium_cart_recovery",
+            "medium_checkout_flow",
+            "hard_policy_assessment",
+            "hard_cancel_dispute",
         ]
         self._task_index = 0
         self._rng = Random()
@@ -74,8 +77,30 @@ class EcommerceCustomerInteractionEnvironment(Environment):
 
         self._cart: Dict[str, int] = {}
         self._coupon_applied: Optional[str] = None
+        # Extended state
+        self._wishlist: List[str] = []
+        self._order_history: List[Dict[str, str]] = []
+        self._delivery_charges: Optional[float] = None
+        self._selected_address: Optional[str] = None
+        self._selected_payment: Optional[str] = None
+        self._available_addresses: Dict[str, Dict[str, Any]] = {
+            "ADDR-HOME": {"label": "Home", "city": "Mumbai", "pincode": "400001", "delivery_days": 3},
+            "ADDR-WORK": {"label": "Office", "city": "Bangalore", "pincode": "560001", "delivery_days": 2},
+            "ADDR-ALT":  {"label": "Alternate", "city": "Delhi", "pincode": "110001", "delivery_days": 4},
+        }
+        self._available_payments: List[str] = ["credit_card", "upi", "cod", "wallet"]
+        self._payment_status: Optional[str] = None  # None -> "initiated" -> "confirmed"
 
         self._metrics: Dict[str, Any] = {}
+
+    def _reset_extended_state(self) -> None:
+        """Clears extended state variables added for the new operations."""
+        self._wishlist = []
+        self._order_history = []
+        self._delivery_charges = None
+        self._selected_address = None
+        self._selected_payment = None
+        self._payment_status = None  # None -> "initiated" -> "confirmed"
         self._previous_grade: GradeResult = grade_episode(
             "easy_order_tracking",
             {
@@ -109,6 +134,19 @@ class EcommerceCustomerInteractionEnvironment(Environment):
             "deny_return": 0.06,
             "send_message": 0.03,
             "escalate": 0.15,
+            # Extended operation costs
+            "view_order_history": 0.04,
+            "cancel_order": 0.10,
+            "check_delivery_charges": 0.03,
+            "choose_delivery_address": 0.03,
+            "select_payment_method": 0.03,
+            "save_to_wishlist": 0.02,
+            "view_wishlist": 0.02,
+            "contact_support": 0.08,
+            # Payment flow operation costs
+            "check_payment_options": 0.02,
+            "initiate_payment": 0.06,
+            "confirm_payment": 0.08,
         }
         return float(costs.get(operation, 0.08))
 
@@ -155,6 +193,7 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         self._cart = {}
         self._coupon_applied = None
         self._reset_metrics()
+        self._reset_extended_state()
 
         self._episode["seed"] = seed
         budget = float(TASK_CONFIGS[self._selected_task].action_budget)
@@ -228,6 +267,20 @@ class EcommerceCustomerInteractionEnvironment(Environment):
                 self._last_outcome = "Customer trust dropped due to premature cancellation advice."
             else:
                 self._last_outcome = "Customer received shipping guidance."
+
+        elif action.operation == "view_order_history":
+            # Extended: let agent view past orders for context
+            self._order_history = list(self._episode.get("order_history", []))
+            self._metrics["order_history_viewed"] = True
+            immediate += 0.05
+            history_summary = "; ".join(
+                f"{h['order_id']}({h['status']})" for h in self._order_history
+            )
+            self._last_outcome = f"Order history retrieved: {history_summary}."
+
+        elif action.operation == "contact_support":
+            immediate += 0.03
+            self._last_outcome = "Support ticket opened. A specialist will follow up with the customer."
 
         else:
             self._failed_ops += 1
@@ -305,7 +358,39 @@ class EcommerceCustomerInteractionEnvironment(Environment):
                 self._metrics["escalation_overuse"] = True
             immediate += 0.05
             self._last_outcome = "Case escalated to specialist."
-            
+
+        elif action.operation == "view_order_history":
+            # Extended: view past orders for context during returns
+            self._order_history = list(self._episode.get("order_history", []))
+            self._metrics["order_history_viewed"] = True
+            immediate += 0.05
+            history_summary = "; ".join(
+                f"{h['order_id']}({h['status']})" for h in self._order_history
+            )
+            self._last_outcome = f"Order history retrieved: {history_summary}."
+
+        elif action.operation == "cancel_order":
+            # Extended: cancel an order — only valid if order hasn't shipped
+            order = self._episode["orders"].get(action.order_id or "", None)
+            if not order:
+                self._failed_ops += 1
+                self._last_outcome = "Cancel failed: order not found."
+                return 0.0, True
+            order_status = order.get("true_status", "delivered")
+            if order_status in {"in_transit", "out_for_delivery", "delivered"}:
+                self._failed_ops += 1
+                backfire = True
+                self._metrics["wrong_cancellation"] = True
+                self._last_outcome = f"Cancel failed: order is already {order_status.replace('_', ' ')}. Cannot cancel."
+            else:
+                order["true_status"] = "cancelled"
+                immediate += 0.10
+                self._last_outcome = f"Order {action.order_id} cancelled successfully."
+
+        elif action.operation == "contact_support":
+            immediate += 0.03
+            self._last_outcome = "Support ticket opened. A specialist will follow up with the customer."
+
         else:
             self._failed_ops += 1
 
@@ -409,10 +494,417 @@ class EcommerceCustomerInteractionEnvironment(Environment):
             immediate += reassurance
             self._last_outcome = "Customer reassurance sent while carts are volatile."
 
+        elif action.operation == "check_delivery_charges":
+            # Extended: compute delivery charge based on cart subtotal
+            rules = self._episode.get("delivery_charge_rules", {"free_above": 500.0, "flat_rate": 49.0})
+            subtotal = sum(float(self._catalog[pid]["price"]) * qty for pid, qty in self._cart.items())
+            if subtotal >= rules["free_above"]:
+                self._delivery_charges = 0.0
+                self._last_outcome = f"Free delivery! Cart subtotal ${subtotal:.2f} exceeds ${rules['free_above']:.2f} threshold."
+            else:
+                self._delivery_charges = rules["flat_rate"]
+                self._last_outcome = f"Delivery charge: ${rules['flat_rate']:.2f}. Add ${rules['free_above'] - subtotal:.2f} more for free delivery."
+            self._metrics["delivery_checked"] = True
+            immediate += 0.05
+
+        elif action.operation == "choose_delivery_address":
+            # Extended: select a delivery address
+            addresses = self._episode.get("available_addresses", self._available_addresses)
+            addr_id = action.address_id or ""
+            if addr_id in addresses:
+                self._selected_address = addr_id
+                addr = addresses[addr_id]
+                self._metrics["address_selected"] = True
+                immediate += 0.05
+                self._last_outcome = f"Delivery address set to {addr['label']} ({addr['city']}, {addr['pincode']}). Est. delivery: {addr['delivery_days']} days."
+            else:
+                self._failed_ops += 1
+                available = ", ".join(addresses.keys())
+                self._last_outcome = f"Invalid address ID '{addr_id}'. Available: {available}."
+
+        elif action.operation == "select_payment_method":
+            # Extended: select a payment method
+            valid_methods = self._episode.get("available_payments", self._available_payments)
+            method = action.payment_method or ""
+            if method in valid_methods:
+                self._selected_payment = method
+                self._metrics["payment_selected"] = True
+                immediate += 0.05
+                self._last_outcome = f"Payment method set to {method}."
+            else:
+                self._failed_ops += 1
+                self._last_outcome = f"Invalid payment method '{method}'. Available: {', '.join(valid_methods)}."
+
+        elif action.operation == "save_to_wishlist":
+            # Extended: save a product to wishlist (useful when out-of-stock)
+            pid = action.product_id or ""
+            if pid in self._catalog:
+                if pid not in self._wishlist:
+                    self._wishlist.append(pid)
+                immediate += 0.03
+                self._last_outcome = f"Product {pid} saved to wishlist."
+            else:
+                self._failed_ops += 1
+                self._last_outcome = f"Cannot save unknown product '{pid}' to wishlist."
+
+        elif action.operation == "view_wishlist":
+            # Extended: view current wishlist
+            if self._wishlist:
+                items = ", ".join(self._wishlist)
+                self._last_outcome = f"Wishlist contains: {items}."
+            else:
+                self._last_outcome = "Wishlist is empty."
+            immediate += 0.02
+
+        elif action.operation == "cancel_order":
+            # Extended: not applicable in cart recovery (no placed orders yet typically)
+            self._failed_ops += 1
+            self._last_outcome = "Cancel not applicable during cart recovery -- no orders placed yet."
+
+        elif action.operation == "check_payment_options":
+            # Payment flow: list available payment methods
+            valid_methods = self._episode.get("available_payments", self._available_payments)
+            methods_str = ", ".join(valid_methods)
+            immediate += 0.03
+            self._last_outcome = f"Available payment options: {methods_str}."
+
+        elif action.operation == "initiate_payment":
+            # Payment flow: start payment processing (requires payment method selected)
+            if not self._selected_payment:
+                self._failed_ops += 1
+                self._last_outcome = "Cannot initiate payment: no payment method selected. Use select_payment_method first."
+            elif self._payment_status == "initiated":
+                self._last_outcome = "Payment already initiated. Use confirm_payment to finalize."
+                immediate += 0.01
+            else:
+                self._payment_status = "initiated"
+                self._metrics["payment_initiated"] = True
+                immediate += 0.08
+                self._last_outcome = f"Payment initiated via {self._selected_payment}. Awaiting confirmation."
+
+        elif action.operation == "confirm_payment":
+            # Payment flow: confirm/finalize the payment
+            if self._payment_status != "initiated":
+                self._failed_ops += 1
+                self._last_outcome = "Cannot confirm payment: payment not yet initiated. Use initiate_payment first."
+            else:
+                # Stochastic: small chance of payment failure
+                fail_p = 0.10 if self._selected_payment == "cod" else 0.05
+                if self._rng.random() < fail_p:
+                    self._payment_status = None
+                    self._failed_ops += 1
+                    backfire = True
+                    self._last_outcome = f"Payment confirmation failed via {self._selected_payment}. Please retry."
+                else:
+                    self._payment_status = "confirmed"
+                    self._metrics["payment_confirmed"] = True
+                    immediate += 0.10
+                    self._last_outcome = f"Payment confirmed via {self._selected_payment}."
+
         else:
             self._failed_ops += 1
 
         self._update_hard_budget_ratio(budget)
+        return _clamp01(immediate), backfire
+
+    def _wishlist_browse_transition(self, action: EcommerceAction) -> tuple[float, bool]:
+        """
+        Handles state transitions for the wishlist browsing task.
+        The agent helps a customer explore the catalog, save items to wishlist,
+        and get product recommendations without making a purchase.
+        """
+        immediate = 0.0
+        backfire = False
+
+        if action.operation in {"search_catalog", "recommend"}:
+            self._metrics["catalog_searched"] = True
+            immediate += 0.15
+            catalog_summary = ", ".join(f"{k} (${v['price']})" for k, v in self._catalog.items())
+            if action.operation == "recommend":
+                self._metrics["recommendation_given"] = True
+                self._last_outcome = f"Recommendations provided from catalog: {catalog_summary}."
+            else:
+                self._last_outcome = f"Catalog search results: {catalog_summary}."
+
+        elif action.operation == "save_to_wishlist":
+            pid = action.product_id or ""
+            if pid in self._catalog:
+                if pid not in self._wishlist:
+                    self._wishlist.append(pid)
+                    self._metrics["wishlist_items_saved"] = len(self._wishlist)
+                immediate += 0.15
+                self._last_outcome = f"Product {pid} (${self._catalog[pid]['price']}) saved to wishlist."
+            else:
+                self._failed_ops += 1
+                self._last_outcome = f"Cannot save unknown product '{pid}' to wishlist."
+
+        elif action.operation == "view_wishlist":
+            if self._wishlist:
+                items = ", ".join(f"{p} (${self._catalog[p]['price']})" for p in self._wishlist)
+                self._last_outcome = f"Wishlist contains: {items}."
+            else:
+                self._last_outcome = "Wishlist is empty."
+            immediate += 0.05
+
+        elif action.operation == "send_message":
+            self._metrics["customer_messaged"] = True
+            immediate += 0.10
+            self._last_outcome = "Customer received product guidance."
+
+        elif action.operation == "contact_support":
+            immediate += 0.03
+            self._last_outcome = "Support ticket opened for browsing assistance."
+
+        else:
+            self._failed_ops += 1
+            backfire = action.operation in {"place_order", "approve_return"}
+
+        return _clamp01(immediate), backfire
+
+    def _checkout_flow_transition(self, action: EcommerceAction) -> tuple[float, bool]:
+        """
+        Handles state transitions for the full checkout flow task.
+        The agent must complete: cart -> delivery check -> address -> payment -> order.
+        Reuses cart_transition logic but adds checkout-specific tracking.
+        """
+        immediate = 0.0
+        backfire = False
+        constraints = self._episode.get("constraints", {})
+        budget = float(constraints.get("shared_budget", 1400.0))
+
+        if action.operation in {"search_catalog", "recommend"}:
+            immediate += 0.05
+            catalog_summary = ", ".join(f"{k} (${v['price']})" for k, v in self._catalog.items())
+            self._last_outcome = f"Catalog: {catalog_summary}."
+
+        elif action.operation == "add_to_cart":
+            pid = action.product_id or ""
+            product = self._catalog.get(pid)
+            if not product:
+                self._failed_ops += 1
+                return 0.0, True
+            fail_p = float(product["volatility"]) * float(self._episode["signals"]["inventory_volatility"]) * 2.2
+            if self._rng.random() < fail_p:
+                self._failed_ops += 1
+                backfire = True
+                self._last_outcome = f"{pid} went out of stock."
+            else:
+                self._cart[pid] = self._cart.get(pid, 0) + max(1, int(action.quantity))
+                self._metrics["items_carted"] = True
+                immediate += 0.12
+                self._last_outcome = f"Added {pid} to cart."
+
+        elif action.operation == "apply_coupon":
+            if action.coupon_code == "SAVE10":
+                self._coupon_applied = "SAVE10"
+                immediate += 0.08
+                self._last_outcome = "Coupon SAVE10 applied."
+            else:
+                self._failed_ops += 1
+
+        elif action.operation == "check_delivery_charges":
+            rules = self._episode.get("delivery_charge_rules", {"free_above": 500.0, "flat_rate": 49.0})
+            subtotal = sum(float(self._catalog[pid]["price"]) * qty for pid, qty in self._cart.items())
+            if subtotal >= rules["free_above"]:
+                self._delivery_charges = 0.0
+                self._last_outcome = f"Free delivery! Cart ${subtotal:.2f} exceeds threshold."
+            else:
+                self._delivery_charges = rules["flat_rate"]
+                self._last_outcome = f"Delivery: ${rules['flat_rate']:.2f}."
+            self._metrics["delivery_checked"] = True
+            immediate += 0.08
+
+        elif action.operation == "choose_delivery_address":
+            addresses = self._episode.get("available_addresses", self._available_addresses)
+            addr_id = action.address_id or ""
+            if addr_id in addresses:
+                self._selected_address = addr_id
+                addr = addresses[addr_id]
+                self._metrics["address_selected"] = True
+                immediate += 0.08
+                self._last_outcome = f"Address set: {addr['label']} ({addr['city']}). Delivery: {addr['delivery_days']} days."
+            else:
+                self._failed_ops += 1
+                self._last_outcome = f"Invalid address '{addr_id}'."
+
+        elif action.operation == "check_payment_options":
+            methods = self._episode.get("available_payments", self._available_payments)
+            self._last_outcome = f"Payment options: {', '.join(methods)}."
+            immediate += 0.03
+
+        elif action.operation == "select_payment_method":
+            valid = self._episode.get("available_payments", self._available_payments)
+            method = action.payment_method or ""
+            if method in valid:
+                self._selected_payment = method
+                self._metrics["payment_selected"] = True
+                immediate += 0.08
+                self._last_outcome = f"Payment set to {method}."
+            else:
+                self._failed_ops += 1
+                self._last_outcome = f"Invalid payment '{method}'."
+
+        elif action.operation == "initiate_payment":
+            if not self._selected_payment:
+                self._failed_ops += 1
+                self._last_outcome = "No payment method selected."
+            elif self._payment_status == "initiated":
+                self._last_outcome = "Payment already initiated."
+                immediate += 0.01
+            else:
+                self._payment_status = "initiated"
+                self._metrics["payment_initiated"] = True
+                immediate += 0.10
+                self._last_outcome = f"Payment initiated via {self._selected_payment}."
+
+        elif action.operation == "confirm_payment":
+            if self._payment_status != "initiated":
+                self._failed_ops += 1
+                self._last_outcome = "Payment not initiated yet."
+            else:
+                fail_p = 0.08 if self._selected_payment == "cod" else 0.04
+                if self._rng.random() < fail_p:
+                    self._payment_status = None
+                    self._failed_ops += 1
+                    backfire = True
+                    self._last_outcome = f"Payment failed via {self._selected_payment}."
+                else:
+                    self._payment_status = "confirmed"
+                    self._metrics["payment_confirmed"] = True
+                    immediate += 0.12
+                    self._last_outcome = f"Payment confirmed via {self._selected_payment}."
+
+        elif action.operation == "place_order":
+            if not self._cart:
+                self._failed_ops += 1
+                self._last_outcome = "Cart is empty."
+                return 0.0, True
+            if self._metrics.get("budget_breached"):
+                self._failed_ops += 1
+                self._last_outcome = "Budget exceeded."
+                return 0.0, True
+            payment_success_p = 0.90 - float(constraints.get("rush_penalty", 0.1))
+            if self._rng.random() < payment_success_p:
+                self._metrics["order_placed"] = True
+                retention = 0.60 + (0.30 * self._rng.random())
+                self._metrics["retention_lift"] = _clamp01(retention)
+                immediate += 0.25
+                self._last_outcome = "Order placed successfully."
+            else:
+                self._failed_ops += 1
+                backfire = True
+                self._last_outcome = "Payment authorization failed."
+
+        elif action.operation == "send_message":
+            immediate += 0.03
+            self._last_outcome = "Customer updated on checkout progress."
+
+        else:
+            self._failed_ops += 1
+
+        self._update_hard_budget_ratio(budget)
+        return _clamp01(immediate), backfire
+
+    def _cancel_dispute_transition(self, action: EcommerceAction) -> tuple[float, bool]:
+        """
+        Handles state transitions for the cancel dispute task.
+        The customer wants to cancel 3 orders in different states.
+        ORD-CAN-01 (pending) -> cancellable
+        ORD-CAN-02 (in_transit) -> NOT cancellable, needs return
+        ORD-CAN-03 (delivered) -> NOT cancellable, needs return
+        """
+        immediate = 0.0
+        backfire = False
+
+        if action.operation == "view_order_history":
+            self._order_history = list(self._episode.get("order_history", []))
+            self._metrics["order_history_viewed"] = True
+            immediate += 0.08
+            history_summary = "; ".join(
+                f"{h['order_id']}({h['status']})" for h in self._order_history
+            )
+            self._last_outcome = f"Order history: {history_summary}."
+
+        elif action.operation == "track_order":
+            order = self._episode["orders"].get(action.order_id or "", None)
+            if not order:
+                self._failed_ops += 1
+                return 0.0, True
+            self._last_outcome = f"Order {action.order_id}: status={order['true_status']}, ETA={order['eta']}."
+            immediate += 0.05
+
+        elif action.operation == "cancel_order":
+            order = self._episode["orders"].get(action.order_id or "", None)
+            if not order:
+                self._failed_ops += 1
+                self._last_outcome = "Cancel failed: order not found."
+                return 0.0, True
+            status = order.get("true_status", "delivered")
+            if status in {"in_transit", "out_for_delivery", "delivered"}:
+                self._failed_ops += 1
+                backfire = True
+                self._metrics["wrong_cancellation"] = True
+                self._last_outcome = f"Cancel failed: {action.order_id} is {status.replace('_', ' ')}."
+            else:
+                order["true_status"] = "cancelled"
+                self._metrics["correct_cancel"] = True
+                self._metrics["triage_quality"] = _clamp01(
+                    float(self._metrics.get("triage_quality", 0.0)) + 0.35
+                )
+                immediate += 0.20
+                self._last_outcome = f"Order {action.order_id} cancelled successfully."
+
+        elif action.operation == "start_return":
+            order = self._episode["orders"].get(action.order_id or "", None)
+            if not order:
+                self._failed_ops += 1
+                return 0.0, True
+            status = order.get("true_status", "")
+            if status in {"in_transit", "delivered"}:
+                self._metrics["correct_return_initiated"] = True
+                self._metrics["triage_quality"] = _clamp01(
+                    float(self._metrics.get("triage_quality", 0.0)) + 0.30
+                )
+                immediate += 0.15
+                self._last_outcome = f"Return initiated for {action.order_id}. Fraud risk: {order['fraud_risk']:.2f}, Eligible: {order['eligible']}."
+            else:
+                self._failed_ops += 1
+                self._last_outcome = f"Return not applicable for {action.order_id} (status: {status})."
+
+        elif action.operation in {"approve_return", "deny_return"}:
+            order = self._episode["orders"].get(action.order_id or "", None)
+            if not order:
+                self._failed_ops += 1
+                return 0.0, True
+            approve = (action.operation == "approve_return")
+            should_approve = bool(order["eligible"]) and float(order["fraud_risk"]) < 0.70
+            if approve == should_approve:
+                self._metrics["return_decision_correct"] = True
+                immediate += 0.15
+                self._last_outcome = f"Return decision for {action.order_id} aligned with policy."
+            else:
+                self._failed_ops += 1
+                backfire = True
+                self._last_outcome = f"Incorrect return decision for {action.order_id}."
+
+        elif action.operation == "send_message":
+            self._metrics["customer_messaged"] = True
+            immediate += 0.08
+            self._last_outcome = "Customer updated on cancellation/return status."
+
+        elif action.operation == "contact_support":
+            immediate += 0.03
+            self._last_outcome = "Support ticket opened for cancellation dispute."
+
+        elif action.operation == "escalate":
+            if not self._metrics.get("correct_cancel"):
+                self._metrics["escalation_overuse"] = True
+            immediate += 0.03
+            self._last_outcome = "Case escalated to specialist."
+
+        else:
+            self._failed_ops += 1
+
         return _clamp01(immediate), backfire
 
     def _operation_transition(self, action: EcommerceAction) -> tuple[float, bool]:
@@ -426,7 +918,15 @@ class EcommerceCustomerInteractionEnvironment(Environment):
             return self._order_tracking_transition(action)
         if self._selected_task == "medium_cart_recovery":
             return self._cart_transition(action)
-        return self._policy_assessment_transition(action)
+        if self._selected_task == "hard_policy_assessment":
+            return self._policy_assessment_transition(action)
+        if self._selected_task == "easy_wishlist_browse":
+            return self._wishlist_browse_transition(action)
+        if self._selected_task == "medium_checkout_flow":
+            return self._checkout_flow_transition(action)
+        if self._selected_task == "hard_cancel_dispute":
+            return self._cancel_dispute_transition(action)
+        return self._order_tracking_transition(action)
 
     def _grade_inputs(self) -> Dict[str, float | int | bool]:
         """Constructs the dictionary of variables required by the grader to score the episode."""
@@ -452,6 +952,12 @@ class EcommerceCustomerInteractionEnvironment(Environment):
         if self._selected_task == "medium_cart_recovery" and bool(self._metrics.get("order_placed", False)):
             return True
         if self._selected_task == "hard_policy_assessment" and grade.completed:
+            return True
+        if self._selected_task == "easy_wishlist_browse" and grade.completed:
+            return True
+        if self._selected_task == "medium_checkout_flow" and bool(self._metrics.get("order_placed", False)):
+            return True
+        if self._selected_task == "hard_cancel_dispute" and grade.completed:
             return True
         return False
 
@@ -491,13 +997,41 @@ class EcommerceCustomerInteractionEnvironment(Environment):
             order_status_snapshot["CART-B"] = "resolved" if self._metrics.get("cart_b_resolved") else "at_risk"
         elif self._selected_task == "hard_policy_assessment":
             order_status_snapshot["ORD-RET-99"] = "decision_pending" if not self._metrics.get("decision_made") else "decision_recorded"
+        elif self._selected_task == "easy_wishlist_browse":
+            saved = int(self._metrics.get("wishlist_items_saved", 0))
+            order_status_snapshot["wishlist_progress"] = f"{saved}_items_saved"
+        elif self._selected_task == "medium_checkout_flow":
+            steps_done = sum([
+                bool(self._metrics.get("items_carted")),
+                bool(self._metrics.get("delivery_checked")),
+                bool(self._metrics.get("address_selected")),
+                bool(self._metrics.get("payment_confirmed")),
+                bool(self._metrics.get("order_placed")),
+            ])
+            order_status_snapshot["checkout_pipeline"] = f"{steps_done}_of_5_complete"
+        elif self._selected_task == "hard_cancel_dispute":
+            for oid in ["ORD-CAN-01", "ORD-CAN-02", "ORD-CAN-03"]:
+                order = task["orders"].get(oid, {})
+                order_status_snapshot[oid] = order.get("true_status", "unknown")
 
         # Expose coarse progress signals but avoid leaking hidden probabilities.
         observable_flags = {
             "operation_failures": self._failed_ops > 0,
+            "failed_ops_count": self._failed_ops,
             "budget_pressure": bool(self._metrics.get("budget_breached", False)),
             "multi_cart_ready": bool(self._metrics.get("cart_a_resolved", False) and self._metrics.get("cart_b_resolved", False)),
         }
+        # Bug 3 fix: Add return-workflow progress signals for hard_policy_assessment.
+        # These are legitimate observable states (has intake started? has decision been made?)
+        # without leaking any hidden backend values (fraud_risk, eligibility).
+        if self._selected_task == "hard_policy_assessment":
+            observable_flags["return_intake_done"] = bool(self._metrics.get("initiated", False))
+            observable_flags["return_decision_made"] = bool(self._metrics.get("decision_made", False))
+            observable_flags["return_next_step"] = (
+                "send_message" if self._metrics.get("decision_made", False)
+                else "approve_return_or_deny_return" if self._metrics.get("initiated", False)
+                else "start_return"
+            )
 
         return EcommerceObservation(
             task_id=self._selected_task,
@@ -515,6 +1049,19 @@ class EcommerceCustomerInteractionEnvironment(Environment):
                 "deny_return",
                 "send_message",
                 "escalate",
+                # Extended operations
+                "view_order_history",
+                "cancel_order",
+                "check_delivery_charges",
+                "choose_delivery_address",
+                "select_payment_method",
+                "save_to_wishlist",
+                "view_wishlist",
+                "contact_support",
+                # Payment flow operations
+                "check_payment_options",
+                "initiate_payment",
+                "confirm_payment",
             ],
             known_products=list(task.get("known_products", [])),
             known_orders=list(task.get("known_orders", [])),
@@ -529,6 +1076,13 @@ class EcommerceCustomerInteractionEnvironment(Environment):
             grader_score=self._previous_grade.score,
             last_action_outcome=self._last_outcome,
             reward_breakdown=reward,
+            # Extended observation fields
+            wishlist=list(self._wishlist),
+            order_history=list(self._order_history),
+            delivery_charges=self._delivery_charges,
+            selected_address=self._selected_address,
+            selected_payment=self._selected_payment,
+            payment_status=self._payment_status,
             metadata={
                 "difficulty": TASK_CONFIGS[self._selected_task].difficulty,
                 "step_budget": TASK_CONFIGS[self._selected_task].max_steps,

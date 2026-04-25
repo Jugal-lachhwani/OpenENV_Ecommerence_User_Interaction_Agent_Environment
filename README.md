@@ -82,25 +82,52 @@ Unlike static text parsers, this simulation behaves like a real warehouse via `g
 * **Penalty & Spam Tracking:** Repeating loops or hallucinating operations deducts efficiency points via non-trivial mathematical grading.
 
 
-# Till Now, The Agent and tasks.
-- easy_order_tracking: Handling customer queries about shipping status and ETAs.
-- medium_policy_assessment: Processing refund/return requests while balancing customer appeasement, policy constraints, and fraud risk.
-- hard_cart_recovery: Dealing with a shared shopping cart, resolving multi-item dependencies, managing budget limits, and navigating inventory volatility.
+# Tasks (6 Total)
+
+**Original Tasks:**
+- **easy_order_tracking**: Handling customer queries about shipping status and ETAs.
+- **medium_cart_recovery**: Dealing with a shared shopping cart, resolving multi-item dependencies, managing budget limits, and navigating inventory volatility.
+- **hard_policy_assessment**: Processing refund/return requests while balancing customer appeasement, policy constraints, and fraud risk.
+
+**Extended Tasks:**
+- **easy_wishlist_browse**: Customer browses the catalog, saves favorites to wishlist, and receives product recommendations.
+- **medium_checkout_flow**: Full end-to-end checkout pipeline — cart, delivery charges, address selection, payment flow, and order placement.
+- **hard_cancel_dispute**: Customer demands cancellation of 3 orders in different states. Agent must triage correctly — cancel pending, initiate returns for shipped/delivered.
 
 # 🛠️ Available Tools / Operations
-The agent can execute the following 11 actions to complete the tasks above:
+The agent can execute the following 22 actions to complete the tasks above:
 
+**Search & Sales:**
 - search_catalog: Looks up product availability and pricing.
 - recommend: Suggests items to the customer.
 - add_to_cart: Adds specified quantities of a product to the cart.
 - apply_coupon: Attempts to apply a designated discount code to the cart.
 - place_order: Finalizes checkout for the items in the cart (evaluates budget and dependencies).
+
+**Logistics & Returns:**
 - track_order: Fetch tracking data (status, ETA) for a specific order ID.
 - start_return: Initiates intake processing and risk evaluation for an order return.
 - approve_return: Approves a return request (decision impacts fraud risk and customer satisfaction).
 - deny_return: Denies a return request.
+
+**Customer Interaction:**
 - send_message: Communicates directly with the customer (used for sharing ETAs, policies, empathy, or reassurance).
 - escalate: Bumps the current case to a human specialist.
+
+**Extended Operations:**
+- view_order_history: Retrieves the customer's past order history for context.
+- cancel_order: Cancels an active order (fails if already shipped/delivered).
+- check_delivery_charges: Computes delivery charges based on cart value and delivery rules.
+- choose_delivery_address: Selects a delivery address by ID (ADDR-HOME, ADDR-WORK, ADDR-ALT).
+- select_payment_method: Selects a payment method (credit_card, upi, cod, wallet).
+- save_to_wishlist: Saves a product to the customer's wishlist (useful for out-of-stock items).
+- view_wishlist: Returns all products currently in the wishlist.
+- contact_support: Opens a support ticket for specialist follow-up (non-terminal).
+
+**Payment Flow:**
+- check_payment_options: Lists all available payment methods for the customer.
+- initiate_payment: Starts payment processing (requires a payment method to be selected first).
+- confirm_payment: Finalizes and confirms the payment (stochastic failure possible).
 
 
 

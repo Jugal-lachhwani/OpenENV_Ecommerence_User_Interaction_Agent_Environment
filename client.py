@@ -64,6 +64,9 @@ class EcommerceSupportEnv(
             "reason": action.reason,
             "message": action.message,
             "seed": action.seed,
+            # Extended fields
+            "address_id": action.address_id,
+            "payment_method": action.payment_method,
         }
 
     def _parse_result(self, payload: Dict) -> StepResult[EcommerceObservation]:
@@ -100,6 +103,13 @@ class EcommerceSupportEnv(
                 safety_penalty=reward_data.get("safety_penalty", 0.0),
                 total_reward=reward_data.get("total_reward", 0.0),
             ),
+            # Extended observation fields
+            wishlist=obs_data.get("wishlist", []),
+            order_history=obs_data.get("order_history", []),
+            delivery_charges=obs_data.get("delivery_charges"),
+            selected_address=obs_data.get("selected_address"),
+            selected_payment=obs_data.get("selected_payment"),
+            payment_status=obs_data.get("payment_status"),
             done=payload.get("done", False),
             reward=payload.get("reward"),
             metadata=obs_data.get("metadata", {}),

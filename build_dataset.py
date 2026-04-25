@@ -122,10 +122,77 @@ SCENARIOS = {
             "orders": ["CART-A", "CART-B"],
             "products": ["SKU-LAP-15", "SKU-LAP-14", "SKU-MSE-01", "SKU-BAG-07", "SKU-JKT-22"]
         }
-    ]
+    ],
+    "easy_wishlist_browse": [
+        {
+            "objective": "Help the customer browse products, save items to their wishlist, and recommend alternatives.",
+            "query": "I'm looking for a laptop and a bag. Can you show me what's available and save the best options to my wishlist?",
+            "orders": [],
+            "products": ["SKU-LAP-15", "SKU-LAP-14", "SKU-MSE-01", "SKU-BAG-07", "SKU-JKT-22"]
+        },
+        {
+            "objective": "Help the customer browse products, save items to their wishlist, and recommend alternatives.",
+            "query": "I want to explore jackets and mice. Save the ones you recommend to my wishlist.",
+            "orders": [],
+            "products": ["SKU-LAP-15", "SKU-LAP-14", "SKU-MSE-01", "SKU-BAG-07", "SKU-JKT-22"]
+        },
+        {
+            "objective": "Help the customer browse products, save items to their wishlist, and recommend alternatives.",
+            "query": "Show me your catalog and help me save a few items to my wishlist for later.",
+            "orders": [],
+            "products": ["SKU-LAP-15", "SKU-LAP-14", "SKU-MSE-01", "SKU-BAG-07", "SKU-JKT-22"]
+        },
+    ],
+    "medium_checkout_flow": [
+        {
+            "objective": "Complete a full checkout: add items to cart, check delivery, select address and payment, then place order.",
+            "query": "I want to buy SKU-LAP-14 and SKU-BAG-07. Deliver to my home address and I'll pay with credit card.",
+            "orders": [],
+            "products": ["SKU-LAP-15", "SKU-LAP-14", "SKU-MSE-01", "SKU-BAG-07", "SKU-JKT-22"]
+        },
+        {
+            "objective": "Complete a full checkout: add items to cart, check delivery, select address and payment, then place order.",
+            "query": "Help me buy a laptop and a bag. Use my work address and UPI payment.",
+            "orders": [],
+            "products": ["SKU-LAP-15", "SKU-LAP-14", "SKU-MSE-01", "SKU-BAG-07", "SKU-JKT-22"]
+        },
+        {
+            "objective": "Complete a full checkout: add items to cart, check delivery, select address and payment, then place order.",
+            "query": "I need to order SKU-LAP-14 and SKU-BAG-07. Check delivery charges and complete payment.",
+            "orders": [],
+            "products": ["SKU-LAP-15", "SKU-LAP-14", "SKU-MSE-01", "SKU-BAG-07", "SKU-JKT-22"]
+        },
+    ],
+    "hard_cancel_dispute": [
+        {
+            "objective": "Triage 3 orders: cancel pending ones, initiate returns for shipped/delivered ones.",
+            "query": "Cancel ALL my orders: ORD-CAN-01, ORD-CAN-02, ORD-CAN-03. I don't want any of them!",
+            "orders": ["ORD-CAN-01", "ORD-CAN-02", "ORD-CAN-03"],
+            "products": ["SKU-LAP-14", "SKU-MSE-01", "SKU-JKT-22"]
+        },
+        {
+            "objective": "Triage 3 orders: cancel pending ones, initiate returns for shipped/delivered ones.",
+            "query": "I need to cancel ORD-CAN-01, ORD-CAN-02, and ORD-CAN-03 immediately. Changed my mind on everything.",
+            "orders": ["ORD-CAN-01", "ORD-CAN-02", "ORD-CAN-03"],
+            "products": ["SKU-LAP-14", "SKU-MSE-01", "SKU-JKT-22"]
+        },
+        {
+            "objective": "Triage 3 orders: cancel pending ones, initiate returns for shipped/delivered ones.",
+            "query": "I want a full cancellation on orders ORD-CAN-01, ORD-CAN-02, and ORD-CAN-03. Do it now!",
+            "orders": ["ORD-CAN-01", "ORD-CAN-02", "ORD-CAN-03"],
+            "products": ["SKU-LAP-14", "SKU-MSE-01", "SKU-JKT-22"]
+        },
+    ],
 }
 
-REPEATS = {"easy_order_tracking": 40, "hard_policy_assessment": 40, "medium_cart_recovery": 35}
+REPEATS = {
+    "easy_order_tracking": 40,
+    "hard_policy_assessment": 40,
+    "medium_cart_recovery": 35,
+    "easy_wishlist_browse": 40,
+    "medium_checkout_flow": 35,
+    "hard_cancel_dispute": 35,
+}
 
 
 def build(push: bool = False, hf_username: str = "") -> Dataset:
