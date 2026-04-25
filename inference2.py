@@ -1,15 +1,13 @@
-"""Baseline inference runner for ecommerce-customer-interaction-env.
+"""Inference runner for ecommerce-customer-interaction-env.
 
-Required environment variables:
-- NVIDIA_API_KEY
+Uses LangChain ChatOllama with structured output to guarantee valid JSON
+from small local models (llama3.1:8b) that cannot reliably format JSON on
+their own.
 
-Optional:
-- API_BASE_URL (default: NVIDIA NIMs endpoint)
-- MODEL_NAME (default: a NVIDIA-hosted chat model)
-- HF_TOKEN / API_KEY (fallback auth variables)
-- ENV_BASE_URL (default: http://localhost:8000)
-- LOCAL_IMAGE_NAME (if provided, starts env via docker image)
-- BENCHMARK_NAME (default: ecommerce_customer_interaction_env)
+Optional env vars:
+- MODEL_NAME  (default: llama3.1:8b)
+- ENV_BASE_URL (default: http://localhost:8001)
+- BENCHMARK_NAME
 """
 
 from __future__ import annotations
@@ -21,22 +19,23 @@ import os
 # Fix for OpenBLAS memory allocation crashes on Windows
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 os.environ["OMP_NUM_THREADS"] = "1"
+
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
-from openai import OpenAI
+from pydantic import BaseModel, Field
+from langchain_ollama import ChatOllama
 
 from models import EcommerceAction, EcommerceObservation
 from client import MyEnv
 
 
+# ── .env loader ────────────────────────────────────────────────────────────────
 def _load_dotenv_if_present() -> None:
-    """Lightweight .env loader so the script works without external dotenv dependency."""
     env_path = Path(__file__).resolve().with_name(".env")
     if not env_path.exists():
         return
-
     for raw_line in env_path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
@@ -50,18 +49,38 @@ def _load_dotenv_if_present() -> None:
 
 _load_dotenv_if_present()
 
-API_BASE_URL = os.getenv("API_BASE_URL", "https://integrate.api.nvidia.com/v1")
-MODEL_NAME = os.getenv("MODEL_NAME", "meta/llama-3.1-70b-instruct")
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
-HF_TOKEN = os.getenv("HF_TOKEN")
-API_KEY = os.getenv("API_KEY")
-AUTH_TOKEN = NVIDIA_API_KEY or HF_TOKEN or API_KEY
-ENV_BASE_URL = os.getenv("ENV_BASE_URL", "http://localhost:8000")
+# ── Config ─────────────────────────────────────────────────────────────────────
+MODEL_NAME   = os.getenv("MODEL_NAME",    "llama3.1:8b")
+OLLAMA_HOST  = os.getenv("OLLAMA_HOST",   "http://localhost:11434")
+ENV_BASE_URL = os.getenv("ENV_BASE_URL",  "http://localhost:8001")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
-BENCHMARK_NAME = os.getenv("BENCHMARK_NAME", "ecommerce_customer_interaction_env")
+BENCHMARK_NAME   = os.getenv("BENCHMARK_NAME", "ecommerce_customer_interaction_env")
 MAX_STEPS_PER_TASK = 14
 
 
+# ── Structured output schema ────────────────────────────────────────────────────
+# This Pydantic model is passed to ChatOllama.with_structured_output().
+# Ollama will enforce this schema via its JSON-mode, so the model CANNOT
+# output free-form text — it MUST return a valid JSON object matching this.
+class ActionSchema(BaseModel):
+    """The action the agent wants to take in the e-commerce environment."""
+    thought: str = Field(description="Briefly explain your reasoning for this action based on the current state and past history.")
+    operation: Literal[
+        "set_task", "track_order", "send_message", "start_return",
+        "approve_return", "deny_return", "search_catalog", "add_to_cart",
+        "apply_coupon", "place_order", "escalate",
+    ] = Field(description="The operation to perform.")
+    task_id: Optional[str]     = Field(None, description="Task ID if setting a task.")
+    product_id: Optional[str]  = Field(None, description="Product SKU e.g. SKU-LAP-14.")
+    order_id: Optional[str]    = Field(None, description="Order ID e.g. ORD-TRK-17.")
+    coupon_code: Optional[str] = Field(None, description="Coupon code e.g. SAVE10.")
+    quantity: int              = Field(1,    description="Quantity for add_to_cart.")
+    reason: Optional[str]      = Field(None, description="Reason for deny_return.")
+    message: Optional[str]     = Field(None, description="Message text for send_message.")
+    seed: Optional[int]        = Field(None, description="Seed for stochastic reset (leave null).")
+
+
+# ── Episode result ──────────────────────────────────────────────────────────────
 @dataclass
 class EpisodeResult:
     task_id: str
@@ -71,32 +90,41 @@ class EpisodeResult:
     success: bool
 
 
+# ── Logging ─────────────────────────────────────────────────────────────────────
 def log_start(task: str, env: str, model: str) -> None:
+    print(f"\n{'='*60}", flush=True)
     print(f"[START] task={task} env={env} model={model}", flush=True)
+    print(f"{'='*60}", flush=True)
 
 
 def log_step(step: int, action_str: str, reward: float, done: bool, error: Optional[str]) -> None:
-    done_value = str(done).lower()
+    status = "✅" if reward > 0.1 else ("⚠️" if reward > 0 else "❌")
     error_value = error if error else "null"
     print(
-        f"[STEP] step={step} action={action_str} reward={reward:.2f} done={done_value} error={error_value}",
+        f"  {status} [STEP {step:2d}] reward={reward:.2f} done={str(done).lower()} error={error_value}",
         flush=True,
     )
+    try:
+        act = json.loads(action_str)
+        detail = act.get("order_id") or act.get("product_id") or (act.get("message") or "")[:60]
+        print(f"           op={act.get('operation')} → {detail}", flush=True)
+    except Exception:
+        pass
 
 
 def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
-    rewards_str = ",".join(f"{item:.2f}" for item in rewards)
-    print(
-        f"[END] success={str(success).lower()} steps={steps} score={score:.3f} rewards={rewards_str}",
-        flush=True,
-    )
+    status = "🏆 SUCCESS" if success else "❌ FAILED"
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(f"\n  {status} | steps={steps} | final_score={score:.3f}", flush=True)
+    print(f"  rewards=[{rewards_str}]", flush=True)
 
 
-def build_prompt(obs: EcommerceObservation) -> str:
+# ── Prompt builder ──────────────────────────────────────────────────────────────
+def build_prompt(obs: EcommerceObservation, history: List[str]) -> str:
+    history_str = "\n".join(history) if history else "No actions taken yet."
     return (
-        "You are solving an e-commerce operations task in a verifiable environment. "
-        "Return ONLY compact JSON with keys: operation, task_id, product_id, order_id, coupon_code, quantity, reason, message. "
-        "Use null for unused fields.\n"
+        "You are an expert e-commerce customer service agent.\n"
+        "Choose the best next action based on the current environment state.\n\n"
         f"ALLOWED_OPERATIONS: {', '.join(obs.allowed_operations)}\n"
         f"task_id={obs.task_id}\n"
         f"objective={obs.task_objective}\n"
@@ -109,90 +137,74 @@ def build_prompt(obs: EcommerceObservation) -> str:
         f"cart_subtotal={obs.cart_subtotal}\n"
         f"coupon_applied={obs.coupon_applied}\n"
         f"order_status_snapshot={obs.order_status_snapshot}\n"
-        f"task_flags={obs.task_flags}\n"
-        "Prioritize policy-compliant, minimal-step completion."
+        f"task_flags={obs.task_flags}\n\n"
+        f"ACTION HISTORY (Past Steps):\n{history_str}\n\n"
+        "Rules:\n"
+        "1. Never reveal fraud scores or internal risk data to the customer.\n"
+        "2. Always track orders before discussing their status.\n"
+        "3. DO NOT repeat the exact same action if it didn't solve the problem.\n"
+        "4. If you have the information you need, use 'send_message' to finish the task.\n"
+        "5. Use null for any fields that are not needed for this operation."
     )
 
 
-def parse_action(content: str) -> Optional[Dict[str, object]]:
-    text = content.strip()
-    if not text:
-        return None
-    if "```" in text:
-        text = text.replace("```json", "").replace("```", "").strip()
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        return None
-    return None
-
-
-def llm_action(
-    client: OpenAI,
+# ── LLM call with structured output ────────────────────────────────────────────
+async def llm_action(
+    llm_structured,          # ChatOllama instance bound with .with_structured_output()
     obs: EcommerceObservation,
+    history: List[str],
 ) -> tuple[Optional[Dict[str, object]], Optional[str]]:
-    prompt = build_prompt(obs)
+    """
+    Calls ChatOllama with structured output.
+    The model is FORCED to return a JSON object matching ActionSchema —
+    LangChain/Ollama enforces this at the API level, no manual parsing needed.
+    """
+    prompt = build_prompt(obs, history)
     try:
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            temperature=0.0,
-            max_tokens=180,
-            messages=[
-                {"role": "system", "content": "Return valid JSON only."},
-                {"role": "user", "content": prompt},
-            ],
-        )
+        result: ActionSchema = await llm_structured.ainvoke(prompt)
+        return result.model_dump(), None
     except Exception as exc:
-        return None, f"llm_request_failed:{type(exc).__name__}"
-
-    content = (completion.choices[0].message.content or "").strip()
-    parsed = parse_action(content)
-    if parsed is None:
-        return None, "llm_output_invalid_json"
-    return parsed, None
+        return None, f"llm_request_failed:{type(exc).__name__}:{exc}"
 
 
-
-def normalize_action(raw_action: Dict[str, object], task_id: str) -> EcommerceAction:
-    if raw_action.get("operation") == "set_task" and raw_action.get("task_id") is None:
-        raw_action["task_id"] = task_id
+# ── Normalize LangChain dict → EcommerceAction ─────────────────────────────────
+def normalize_action(raw: Dict[str, object], task_id: str) -> EcommerceAction:
+    if raw.get("operation") == "set_task" and raw.get("task_id") is None:
+        raw["task_id"] = task_id
     return EcommerceAction(
-        operation=str(raw_action.get("operation", "send_message")),
-        task_id=(str(raw_action.get("task_id")) if raw_action.get("task_id") else None),
-        product_id=(str(raw_action.get("product_id")) if raw_action.get("product_id") else None),
-        order_id=(str(raw_action.get("order_id")) if raw_action.get("order_id") else None),
-        coupon_code=(str(raw_action.get("coupon_code")) if raw_action.get("coupon_code") else None),
-        quantity=int(raw_action.get("quantity", 1) or 1),
-        reason=(str(raw_action.get("reason")) if raw_action.get("reason") else None),
-        message=(str(raw_action.get("message")) if raw_action.get("message") else None),
-        seed=(int(raw_action.get("seed")) if raw_action.get("seed") is not None else None),
+        operation=str(raw.get("operation", "send_message")),
+        task_id=(str(raw["task_id"]) if raw.get("task_id") else None),
+        product_id=(str(raw["product_id"]) if raw.get("product_id") else None),
+        order_id=(str(raw["order_id"]) if raw.get("order_id") else None),
+        coupon_code=(str(raw["coupon_code"]) if raw.get("coupon_code") else None),
+        quantity=int(raw.get("quantity") or 1),
+        reason=(str(raw["reason"]) if raw.get("reason") else None),
+        message=(str(raw["message"]) if raw.get("message") else None),
+        seed=(int(raw["seed"]) if raw.get("seed") is not None else None),
     )
 
 
-async def run_task(env: MyEnv, client: OpenAI) -> EpisodeResult:
+# ── Task runner ─────────────────────────────────────────────────────────────────
+async def run_task(env: MyEnv, llm_structured) -> EpisodeResult:
     result = await env.reset()
     task_id = result.observation.task_id
     rewards: List[float] = []
     score = 0.0
     steps_taken = 0
-    success = False
+    history: List[str] = []
 
     log_start(task=task_id, env=BENCHMARK_NAME, model=MODEL_NAME)
 
     for step in range(1, MAX_STEPS_PER_TASK + 1):
-        llm_raw, llm_error = llm_action(
-            client,
-            result.observation,
-        )
-        if llm_raw is None:
-            llm_raw = {"operation": "send_message", "message": "LLM failed to output valid JSON"}
-            llm_error = "llm_parsing_error"
+        raw, llm_error = await llm_action(llm_structured, result.observation, history)
+
+        if raw is None:
+            # Structured output failed — send a safe dummy action and log it
+            raw = {"operation": "send_message", "message": "Unable to determine action."}
 
         error: Optional[str] = llm_error
         try:
-            action = normalize_action(llm_raw, task_id)
+            action = normalize_action(raw, task_id)
             result = await env.step(action)
         except Exception as exc:
             error = f"{error or 'env_step_failed'}|{type(exc).__name__}"
@@ -203,7 +215,7 @@ async def run_task(env: MyEnv, client: OpenAI) -> EpisodeResult:
         rewards.append(reward)
         steps_taken = step
 
-        compact_action = {
+        compact = {
             "operation": action.operation,
             "task_id": action.task_id,
             "product_id": action.product_id,
@@ -214,7 +226,11 @@ async def run_task(env: MyEnv, client: OpenAI) -> EpisodeResult:
             "message": action.message,
             "seed": action.seed,
         }
-        log_step(step, json.dumps(compact_action, separators=(",", ":")), reward, result.done, error)
+        
+        # Add to history for next prompt
+        history.append(f"Step {step}: {action.operation} -> {compact}")
+
+        log_step(step, json.dumps(compact, separators=(",", ":")), reward, result.done, error)
 
         score = float(result.observation.grader_score)
         if result.done:
@@ -225,28 +241,51 @@ async def run_task(env: MyEnv, client: OpenAI) -> EpisodeResult:
     return EpisodeResult(task_id=task_id, score=score, rewards=rewards, steps=steps_taken, success=success)
 
 
+# ── Main ────────────────────────────────────────────────────────────────────────
 async def main() -> None:
-    if not AUTH_TOKEN:
-        raise RuntimeError("NVIDIA_API_KEY is required (or fallback HF_TOKEN/API_KEY).")
+    print(f"\n🤖 Model : {MODEL_NAME} (via Ollama at {OLLAMA_HOST})")
+    print(f"🌐 Env   : {ENV_BASE_URL}")
+    print(f"🔒 JSON  : enforced by LangChain structured output (no parsing failures)\n")
 
-    client = OpenAI(base_url=API_BASE_URL, api_key=AUTH_TOKEN)
+    # Build the ChatOllama chain with structured output.
+    # Ollama uses JSON schema mode internally — the model cannot deviate.
+    base_llm = ChatOllama(
+        model=MODEL_NAME,
+        base_url=OLLAMA_HOST,
+        temperature=0.3,        # Slightly higher temperature to prevent loops
+        num_predict=512,        # More tokens needed for reasoning/thought field
+    )
+    llm_structured = base_llm.with_structured_output(ActionSchema)
 
-    env = await MyEnv.from_docker_image(LOCAL_IMAGE_NAME) if LOCAL_IMAGE_NAME else MyEnv(base_url=ENV_BASE_URL)
+    env = (
+        await MyEnv.from_docker_image(LOCAL_IMAGE_NAME)
+        if LOCAL_IMAGE_NAME
+        else MyEnv(base_url=ENV_BASE_URL)
+    )
     try:
         results = []
-        for _ in range(3):
-            results.append(await run_task(env, client))
+        for i in range(3):
+            print(f"\n--- Episode {i+1}/3 ---")
+            results.append(await run_task(env, llm_structured))
     finally:
         await env.close()
 
-    mean_score = sum(item.score for item in results) / len(results)
+    mean_score = sum(r.score for r in results) / len(results)
+
+    print(f"\n{'='*60}")
+    print(f"📊 FINAL RESULTS")
+    print(f"{'='*60}")
+    for r in results:
+        status = "✅" if r.success else "❌"
+        print(f"  {status} {r.task_id}: score={r.score:.3f} steps={r.steps}")
+    print(f"\n  📈 Mean score: {mean_score:.3f}")
     print(
         json.dumps(
             {
                 "benchmark": BENCHMARK_NAME,
                 "model": MODEL_NAME,
                 "mean_score": round(mean_score, 3),
-                "task_scores": {item.task_id: round(item.score, 3) for item in results},
+                "task_scores": {r.task_id: round(r.score, 3) for r in results},
             },
             separators=(",", ":"),
         ),
