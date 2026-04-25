@@ -127,145 +127,156 @@ def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> No
     print(f"  rewards=[{rewards_str}]", flush=True)
 
 
-# ── Tool Catalog ────────────────────────────────────────────────────────────────
-# Generalized descriptions of every tool so the agent can reason about which
-# to use. No task-specific ordering — the agent must figure that out.
-TOOL_CATALOG = """AVAILABLE TOOLS:
-  search_catalog       - Search product catalog to see what's available and prices
-  recommend            - Suggest products to the customer based on their needs
-  add_to_cart           - Add a product to the cart (requires product_id, e.g. SKU-LAP-14)
-  apply_coupon          - Apply a discount coupon (requires coupon_code)
-  place_order           - Finalize and place the order from cart
-  track_order           - Look up an order's current status and ETA (requires order_id)
-  start_return          - Begin the return process for an order (requires order_id)
-  approve_return        - Approve a pending return request (requires order_id)
-  deny_return           - Deny a return request with reason (requires order_id, reason)
-  send_message          - Send a message to the customer (requires message text)
-  escalate              - Escalate case to a human supervisor
-  view_order_history    - Retrieve the customer's past order history
-  cancel_order          - Cancel a pending order (requires order_id; fails if already shipped)
-  check_delivery_charges - Check delivery fee based on current cart value
-  choose_delivery_address - Select delivery address (requires address_id: ADDR-HOME, ADDR-WORK, or ADDR-ALT)
-  select_payment_method  - Choose payment method (requires payment_method: credit_card, upi, cod, or wallet)
-  check_payment_options  - List all available payment methods
-  initiate_payment       - Start payment processing (must select payment method first)
-  confirm_payment        - Finalize the payment (must initiate payment first)
-  save_to_wishlist       - Save a product to the wishlist (requires product_id)
-  view_wishlist          - View all products saved in the wishlist
-  contact_support        - Open a support ticket for specialist follow-up"""
+# ── Tool Catalog (API-style signatures for 7B grounding) ───────────────────────
+TOOL_CATALOG = """TOOLS:
+search_catalog()                              → shows available products and prices
+recommend()                                   → suggests products to the customer
+add_to_cart(product_id="SKU-XXX")             → adds product to cart
+apply_coupon(coupon_code="SAVE10")            → applies a discount coupon
+place_order()                                 → finalizes checkout from cart
+track_order(order_id="ORD-XXX")              → gets order status and ETA
+start_return(order_id="ORD-XXX")             → begins return process
+approve_return(order_id="ORD-XXX")           → approves a return
+deny_return(order_id="ORD-XXX", reason="..") → denies a return
+send_message(message="...")                   → sends message to customer
+escalate()                                    → escalates to human supervisor
+view_order_history()                          → shows past orders
+cancel_order(order_id="ORD-XXX")             → cancels pending order (fails if shipped)
+check_delivery_charges()                      → shows delivery fee for cart
+choose_delivery_address(address_id="ADDR-HOME|ADDR-WORK|ADDR-ALT") → selects address
+select_payment_method(payment_method="credit_card|upi|cod|wallet")  → selects payment
+check_payment_options()                       → lists payment methods
+initiate_payment()                            → starts payment (needs payment method first)
+confirm_payment()                             → confirms payment (needs initiate first)
+save_to_wishlist(product_id="SKU-XXX")       → saves product to wishlist
+view_wishlist()                               → shows wishlist contents
+contact_support()                             → opens support ticket"""
+
+# ── Few-shot examples per task category ─────────────────────────────────────────
+FEW_SHOT_EXAMPLES = {
+    "tracking": '''Example — order tracking:
+Customer: "Where is my order ORD-TRK-17?"
+Step 1: {"thought": "Need to check order status first", "operation": "track_order", "order_id": "ORD-TRK-17"}
+Step 2: {"thought": "Got status, now tell customer", "operation": "send_message", "message": "Your order is in transit, ETA April 9th."}''',
+
+    "wishlist": '''Example — wishlist browsing:
+Customer: "Show me laptops and save the best ones"
+Step 1: {"thought": "Search catalog first", "operation": "search_catalog"}
+Step 2: {"thought": "Save laptop to wishlist", "operation": "save_to_wishlist", "product_id": "SKU-LAP-14"}
+Step 3: {"thought": "Save another item", "operation": "save_to_wishlist", "product_id": "SKU-BAG-07"}
+Step 4: {"thought": "Recommend alternatives", "operation": "recommend"}
+Step 5: {"thought": "Summarize for customer", "operation": "send_message", "message": "Saved 2 items. Here are more options."}''',
+
+    "checkout": '''Example — checkout flow:
+Customer: "Buy SKU-LAP-14, deliver to home, pay with UPI"
+Step 1: {"thought": "Add item to cart", "operation": "add_to_cart", "product_id": "SKU-LAP-14"}
+Step 2: {"thought": "Check delivery cost", "operation": "check_delivery_charges"}
+Step 3: {"thought": "Set address", "operation": "choose_delivery_address", "address_id": "ADDR-HOME"}
+Step 4: {"thought": "Set payment", "operation": "select_payment_method", "payment_method": "upi"}
+Step 5: {"thought": "Start payment", "operation": "initiate_payment"}
+Step 6: {"thought": "Confirm payment", "operation": "confirm_payment"}
+Step 7: {"thought": "Place order", "operation": "place_order"}''',
+
+    "returns": '''Example — return/refund request:
+Customer: "I want to return ORD-RET-99"
+Step 1: {"thought": "Start return process", "operation": "start_return", "order_id": "ORD-RET-99"}
+Step 2: {"thought": "Approve based on eligibility", "operation": "approve_return", "order_id": "ORD-RET-99"}
+Step 3: {"thought": "Inform customer", "operation": "send_message", "message": "Return approved. Refund in 5-7 days."}''',
+
+    "cancellation": '''Example — cancel orders:
+Customer: "Cancel ORD-CAN-01, ORD-CAN-02, ORD-CAN-03"
+Step 1: {"thought": "Check order history first", "operation": "view_order_history"}
+Step 2: {"thought": "Cancel pending order", "operation": "cancel_order", "order_id": "ORD-CAN-01"}
+Step 3: {"thought": "ORD-CAN-02 is shipped, start return", "operation": "start_return", "order_id": "ORD-CAN-02"}
+Step 4: {"thought": "ORD-CAN-03 is delivered, start return", "operation": "start_return", "order_id": "ORD-CAN-03"}
+Step 5: {"thought": "Tell customer what happened", "operation": "send_message", "message": "ORD-CAN-01 cancelled. ORD-CAN-02 and 03 need returns."}''',
+}
 
 
-def _build_state_summary(obs: EcommerceObservation) -> str:
-    """Builds a concise summary of what the agent has already accomplished."""
-    facts = []
+def _get_few_shot(task_id: str) -> str:
+    """Returns the most relevant few-shot example for the current task."""
+    mapping = {
+        "easy_order_tracking": "tracking",
+        "easy_wishlist_browse": "wishlist",
+        "medium_cart_recovery": "checkout",
+        "medium_checkout_flow": "checkout",
+        "hard_policy_assessment": "returns",
+        "hard_cancel_dispute": "cancellation",
+    }
+    key = mapping.get(task_id, "tracking")
+    return FEW_SHOT_EXAMPLES[key]
+
+
+def _build_state_compact(obs: EcommerceObservation) -> str:
+    """Builds a minimal state string — only non-empty fields."""
+    parts = []
     if obs.cart:
-        facts.append(f"Cart: {obs.cart} (subtotal: ${obs.cart_subtotal})")
-    else:
-        facts.append("Cart: empty")
+        parts.append(f"cart={obs.cart}")
     if obs.wishlist:
-        facts.append(f"Wishlist: {obs.wishlist}")
-    if obs.order_history:
-        statuses = ", ".join(f"{h['order_id']}={h['status']}" for h in obs.order_history)
-        facts.append(f"Order history loaded: {statuses}")
+        parts.append(f"wishlist={obs.wishlist}")
     if obs.selected_address:
-        facts.append(f"Delivery address: {obs.selected_address}")
-    if obs.delivery_charges is not None:
-        facts.append(f"Delivery charges: ${obs.delivery_charges}")
+        parts.append(f"address={obs.selected_address}")
     if obs.selected_payment:
-        facts.append(f"Payment method: {obs.selected_payment}")
+        parts.append(f"payment={obs.selected_payment}")
     if obs.payment_status:
-        facts.append(f"Payment status: {obs.payment_status}")
+        parts.append(f"payment_status={obs.payment_status}")
     if obs.coupon_applied:
-        facts.append(f"Coupon: {obs.coupon_applied}")
-    return "\n".join(f"  - {f}" for f in facts)
+        parts.append(f"coupon={obs.coupon_applied}")
+    return ", ".join(parts) if parts else "nothing done yet"
 
 
 def build_prompt(obs: EcommerceObservation, history: List[str], rewards: List[float]) -> str:
-    history_str = "\n".join(history) if history else "No actions taken yet."
-    state_summary = _build_state_summary(obs)
-    step_num = len(history) + 1
+    history_str = "\n".join(history[-5:]) if history else "None"  # only last 5 steps
+    state = _build_state_compact(obs)
+    few_shot = _get_few_shot(obs.task_id)
 
-    # Anti-loop detection
-    recent_ops = []
-    for h in history[-3:]:
-        if ": " in h:
-            op_part = h.split(": ", 1)[1].split(" ->")[0] if " ->" in h else ""
-            recent_ops.append(op_part)
-    repeat_warning = ""
-    if len(recent_ops) >= 2 and len(set(recent_ops)) == 1:
-        repeat_warning = (
-            f"\n!! WARNING: You have repeated '{recent_ops[0]}' multiple times. "
-            "This is wasting steps. You MUST choose a DIFFERENT tool now !!\n\n"
-        )
-
-    # Reward feedback — let the agent see its reward trajectory
-    reward_feedback = ""
+    # Binary reward signal — simple enough for 7B
+    reward_line = ""
     if rewards:
         last_r = rewards[-1]
-        avg_r = sum(rewards) / len(rewards)
-        if len(rewards) >= 2:
-            trend = rewards[-1] - rewards[-2]
-            if trend > 0.05:
-                trend_label = "IMPROVING — keep this approach"
-            elif trend < -0.05:
-                trend_label = "DECLINING — your last action was not helpful, try a different tool"
-            else:
-                trend_label = "FLAT — consider changing strategy"
+        if last_r < 0.05:
+            reward_line = f"LAST REWARD: {last_r:.2f} → FAILED. Choose a DIFFERENT tool now.\n"
         else:
-            trend_label = "First step completed"
-        reward_feedback = (
-            f"=== REWARD FEEDBACK ===\n"
-            f"last_reward: {last_r:.2f}\n"
-            f"average_reward: {avg_r:.2f}\n"
-            f"trend: {trend_label}\n"
-            f"reward_history: [{', '.join(f'{r:.2f}' for r in rewards)}]\n\n"
-        )
+            reward_line = f"LAST REWARD: {last_r:.2f} → OK. Continue making progress.\n"
+
+    # Hard anti-loop constraint
+    loop_block = ""
+    recent_ops = []
+    for h in history[-2:]:
+        if ": " in h:
+            op = h.split(": ", 1)[1].split(" ->")[0] if " ->" in h else ""
+            recent_ops.append(op)
+    if len(recent_ops) >= 2 and recent_ops[0] == recent_ops[1]:
+        loop_block = f"⛔ BLOCKED: {recent_ops[0]} used twice. Choosing it again is WRONG. Pick something else.\n"
 
     return (
-        "You are an expert e-commerce customer service agent.\n"
-        "You have access to multiple tools. Your job is to analyze the task, "
-        "understand what has already been done, and decide the NEXT best action.\n\n"
+        "You are an e-commerce agent. Pick the best NEXT tool.\n\n"
 
         f"{TOOL_CATALOG}\n\n"
 
-        f"=== TASK ===\n"
-        f"task_id: {obs.task_id}\n"
+        f"{few_shot}\n\n"
+
+        f"--- YOUR TASK ---\n"
         f"objective: {obs.task_objective}\n"
-        f"customer_query: {obs.customer_query}\n\n"
+        f"customer: {obs.customer_query}\n"
+        f"products: {obs.known_products}\n"
+        f"orders: {obs.known_orders}\n"
+        f"state: {state}\n"
+        f"outcome: {obs.last_action_outcome}\n"
+        f"{reward_line}"
+        f"{loop_block}\n"
 
-        f"=== ENVIRONMENT STATE ===\n"
-        f"step: {step_num}\n"
-        f"last_outcome: {obs.last_action_outcome}\n"
-        f"score: {obs.grader_score:.3f}\n"
-        f"known_products: {obs.known_products}\n"
-        f"known_orders: {obs.known_orders}\n"
-        f"order_status: {obs.order_status_snapshot}\n"
-        f"task_flags: {obs.task_flags}\n\n"
+        f"History:\n{history_str}\n\n"
 
-        f"=== PROGRESS SO FAR ===\n"
-        f"{state_summary}\n\n"
+        "Think:\n"
+        "1. What does the customer need?\n"
+        "2. What is still missing?\n"
+        "3. Which ONE tool fixes it?\n\n"
 
-        f"=== ACTION HISTORY ===\n"
-        f"{history_str}\n\n"
-
-        f"{repeat_warning}"
-
-        f"{reward_feedback}"
-
-        "=== THINK STEP-BY-STEP ===\n"
-        "Before choosing your action, reason through these questions in your 'thought' field:\n"
-        "1. GOAL: What is the customer asking for? What does the objective require?\n"
-        "2. PROGRESS: What have I already done? (check action history and progress state)\n"
-        "3. GAPS: What hasn't been done yet that the objective requires?\n"
-        "4. NEXT ACTION: Which single tool from the catalog best addresses the most important gap?\n"
-        "5. PARAMETERS: What specific values (order_id, product_id, address_id, etc.) does this tool need?\n"
-        "6. REWARD CHECK: Is my reward going up or down? If down, I need to change my approach.\n\n"
-
-        "RULES:\n"
-        "- Never reveal fraud scores or internal risk data to the customer.\n"
-        "- Do NOT repeat a tool that already succeeded — move forward.\n"
-        "- Use null for fields not needed by the chosen operation.\n"
-        "- Only use send_message when you have useful information to share with the customer."
+        "STRICT RULES:\n"
+        "- If you repeat the same tool twice in a row, your answer is WRONG.\n"
+        "- Never say 'fraud' or 'risk' to the customer.\n"
+        "- Use null for unused fields."
     )
 
 
