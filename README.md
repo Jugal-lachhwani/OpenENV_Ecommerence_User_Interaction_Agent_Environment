@@ -33,7 +33,7 @@ tags:
 |---|---|
 | 🤗 **Live Environment (HF Space)** | [huggingface.co/spaces/Jugal15/ecommerce-agent-env](https://huggingface.co/spaces/Jugal15/ecommerce-agent-env) |
 | 📖 **Blog Post** | [Beyond the Script: Training AI to Survive E-Commerce Chaos](blog.md) |
-| 🧠 **Trained Model (HF Hub)** | [huggingface.co/Jugal15/ecommerce-agent-grpo-v2](https://huggingface.co/Jugal15/ecommerce-agent-grpo-v2) |
+| 🧠 **Trained Model (HF Hub)** | [huggingface.co/Jugal15/ecommerce-agent-grpo-v2](https://huggingface.co/Jugal15/ecommerce_grpo_phase4) |
 | 📊 **Training Dataset (HF Hub)** | [huggingface.co/datasets/Jugal15/ecommerce-grpo-dataset](https://huggingface.co/datasets/Jugal15/ecommerce-grpo-dataset) |
 | 📹 **Demo Video** | [youtu.be/KKLH2vjwC_c](https://youtu.be/KKLH2vjwC_c?si=DMlBPMwC4hRiHLYA) |
 | 📓 **Colab Notebook** | [Open in Colab](https://colab.research.google.com/drive/1HM9KU1cVEjtl61wvbHQY5ynyE58qv572?usp=sharing) |
