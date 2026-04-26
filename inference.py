@@ -152,59 +152,43 @@ save_to_wishlist(product_id="SKU-XXX")       → saves product to wishlist
 view_wishlist()                               → shows wishlist contents
 contact_support()                             → opens support ticket"""
 
-# ── Few-shot examples per task category ─────────────────────────────────────────
-FEW_SHOT_EXAMPLES = {
-    "tracking": '''Example — order tracking:
-Customer: "Where is my order ORD-TRK-17?"
-Step 1: {"thought": "Need to check order status first", "operation": "track_order", "order_id": "ORD-TRK-17"}
-Step 2: {"thought": "Got status, now tell customer", "operation": "send_message", "message": "Your order is in transit, ETA April 9th."}''',
+# ── Few-shot examples (4 patterns: success + failure recovery) ──────────────────
+FEW_SHOT = '''EXAMPLES:
 
-    "wishlist": '''Example — wishlist browsing:
-Customer: "Show me laptops and save the best ones"
-Step 1: {"thought": "Search catalog first", "operation": "search_catalog"}
-Step 2: {"thought": "Save laptop to wishlist", "operation": "save_to_wishlist", "product_id": "SKU-LAP-14"}
-Step 3: {"thought": "Save another item", "operation": "save_to_wishlist", "product_id": "SKU-BAG-07"}
-Step 4: {"thought": "Recommend alternatives", "operation": "recommend"}
-Step 5: {"thought": "Summarize for customer", "operation": "send_message", "message": "Saved 2 items. Here are more options."}''',
+1) Lookup then reply:
+{"thought": "Need order status", "operation": "track_order", "order_id": "ORD-TRK-17"}
+{"thought": "Got info, tell customer", "operation": "send_message", "message": "In transit, ETA April 9."}
 
-    "checkout": '''Example — checkout flow:
-Customer: "Buy SKU-LAP-14, deliver to home, pay with UPI"
-Step 1: {"thought": "Add item to cart", "operation": "add_to_cart", "product_id": "SKU-LAP-14"}
-Step 2: {"thought": "Check delivery cost", "operation": "check_delivery_charges"}
-Step 3: {"thought": "Set address", "operation": "choose_delivery_address", "address_id": "ADDR-HOME"}
-Step 4: {"thought": "Set payment", "operation": "select_payment_method", "payment_method": "upi"}
-Step 5: {"thought": "Start payment", "operation": "initiate_payment"}
-Step 6: {"thought": "Confirm payment", "operation": "confirm_payment"}
-Step 7: {"thought": "Place order", "operation": "place_order"}''',
+2) Multi-step pipeline:
+{"thought": "Add to cart first", "operation": "add_to_cart", "product_id": "SKU-LAP-14"}
+{"thought": "Set delivery", "operation": "choose_delivery_address", "address_id": "ADDR-HOME"}
+{"thought": "Set payment", "operation": "select_payment_method", "payment_method": "upi"}
+{"thought": "Finalize", "operation": "place_order"}
 
-    "returns": '''Example — return/refund request:
-Customer: "I want to return ORD-RET-99"
-Step 1: {"thought": "Start return process", "operation": "start_return", "order_id": "ORD-RET-99"}
-Step 2: {"thought": "Approve based on eligibility", "operation": "approve_return", "order_id": "ORD-RET-99"}
-Step 3: {"thought": "Inform customer", "operation": "send_message", "message": "Return approved. Refund in 5-7 days."}''',
+3) Triage by status:
+{"thought": "Check history", "operation": "view_order_history"}
+{"thought": "Pending, can cancel", "operation": "cancel_order", "order_id": "ORD-001"}
+{"thought": "Shipped, need return", "operation": "start_return", "order_id": "ORD-002"}
 
-    "cancellation": '''Example — cancel orders:
-Customer: "Cancel ORD-CAN-01, ORD-CAN-02, ORD-CAN-03"
-Step 1: {"thought": "Check order history first", "operation": "view_order_history"}
-Step 2: {"thought": "Cancel pending order", "operation": "cancel_order", "order_id": "ORD-CAN-01"}
-Step 3: {"thought": "ORD-CAN-02 is shipped, start return", "operation": "start_return", "order_id": "ORD-CAN-02"}
-Step 4: {"thought": "ORD-CAN-03 is delivered, start return", "operation": "start_return", "order_id": "ORD-CAN-03"}
-Step 5: {"thought": "Tell customer what happened", "operation": "send_message", "message": "ORD-CAN-01 cancelled. ORD-CAN-02 and 03 need returns."}''',
+4) Failure recovery (LOW reward means switch tool type):
+{"thought": "Search catalog", "operation": "search_catalog"}
+{"thought": "Low reward, products known, switch to action", "operation": "add_to_cart", "product_id": "SKU-LAP-14"}
+{"thought": "Cart has items now, move to checkout", "operation": "check_delivery_charges"}'''
+
+# ── Tool switching map (when stuck on X → try Y) ───────────────────────────────
+TOOL_SWITCH = {
+    "search_catalog": "add_to_cart or recommend or save_to_wishlist",
+    "view_order_history": "cancel_order or start_return or track_order",
+    "add_to_cart": "check_delivery_charges or apply_coupon",
+    "track_order": "send_message or start_return",
+    "start_return": "approve_return or deny_return",
+    "check_delivery_charges": "choose_delivery_address",
+    "choose_delivery_address": "select_payment_method",
+    "select_payment_method": "initiate_payment",
+    "initiate_payment": "confirm_payment",
+    "confirm_payment": "place_order",
+    "save_to_wishlist": "save_to_wishlist or recommend or send_message",
 }
-
-
-def _get_few_shot(task_id: str) -> str:
-    """Returns the most relevant few-shot example for the current task."""
-    mapping = {
-        "easy_order_tracking": "tracking",
-        "easy_wishlist_browse": "wishlist",
-        "medium_cart_recovery": "checkout",
-        "medium_checkout_flow": "checkout",
-        "hard_policy_assessment": "returns",
-        "hard_cancel_dispute": "cancellation",
-    }
-    key = mapping.get(task_id, "tracking")
-    return FEW_SHOT_EXAMPLES[key]
 
 
 def _build_state_compact(obs: EcommerceObservation) -> str:
@@ -225,21 +209,56 @@ def _build_state_compact(obs: EcommerceObservation) -> str:
     return ", ".join(parts) if parts else "nothing done yet"
 
 
-def build_prompt(obs: EcommerceObservation, history: List[str], rewards: List[float]) -> str:
-    history_str = "\n".join(history[-5:]) if history else "None"  # only last 5 steps
-    state = _build_state_compact(obs)
-    few_shot = _get_few_shot(obs.task_id)
+def _build_state_trigger(obs: EcommerceObservation) -> str:
+    """Generates hard if/then rules based on current state."""
+    triggers = []
+    has_cart = bool(obs.cart)
+    has_products = bool(obs.known_products)
+    has_orders = bool(obs.known_orders)
 
-    # Binary reward signal — simple enough for 7B
+    if not has_products and not has_cart:
+        triggers.append("Products unknown -> use search_catalog ONCE, then take action.")
+    if has_products and not has_cart:
+        triggers.append("Products known but cart empty -> use add_to_cart or save_to_wishlist.")
+    if has_cart and not obs.selected_address:
+        triggers.append("Cart has items but no address -> use choose_delivery_address.")
+    if has_cart and obs.selected_address and not obs.selected_payment:
+        triggers.append("Address set but no payment -> use select_payment_method.")
+    if obs.selected_payment and not obs.payment_status:
+        triggers.append("Payment selected but not initiated -> use initiate_payment.")
+    if obs.payment_status == "initiated":
+        triggers.append("Payment initiated -> use confirm_payment.")
+    if obs.payment_status == "confirmed" and has_cart:
+        triggers.append("Payment confirmed -> use place_order.")
+    if has_orders and "cancel" in (obs.task_objective or "").lower():
+        triggers.append("Orders exist + cancel request -> use cancel_order or start_return.")
+    if has_orders and "return" in (obs.task_objective or "").lower():
+        triggers.append("Orders exist + return request -> use start_return.")
+
+    return "\n".join(triggers) if triggers else ""
+
+
+def build_prompt(obs: EcommerceObservation, history: List[str], rewards: List[float]) -> str:
+    history_str = "\n".join(history[-5:]) if history else "None"
+    state = _build_state_compact(obs)
+    state_trigger = _build_state_trigger(obs)
+
+    # Binary reward with specific next-tool suggestion
     reward_line = ""
     if rewards:
         last_r = rewards[-1]
+        last_tool = ""
+        if history:
+            last_h = history[-1]
+            if ": " in last_h:
+                last_tool = last_h.split(": ", 1)[1].split(" ->")[0] if " ->" in last_h else ""
         if last_r < 0.05:
-            reward_line = f"LAST REWARD: {last_r:.2f} → FAILED. Choose a DIFFERENT tool now.\n"
+            alt = TOOL_SWITCH.get(last_tool, "a different tool")
+            reward_line = f"!! LAST REWARD: {last_r:.2f} = FAILED. {last_tool} did not work. Try: {alt}\n"
         else:
-            reward_line = f"LAST REWARD: {last_r:.2f} → OK. Continue making progress.\n"
+            reward_line = f"LAST REWARD: {last_r:.2f} = OK.\n"
 
-    # Hard anti-loop constraint
+    # Hard anti-loop with specific alternative
     loop_block = ""
     recent_ops = []
     for h in history[-2:]:
@@ -247,15 +266,18 @@ def build_prompt(obs: EcommerceObservation, history: List[str], rewards: List[fl
             op = h.split(": ", 1)[1].split(" ->")[0] if " ->" in h else ""
             recent_ops.append(op)
     if len(recent_ops) >= 2 and recent_ops[0] == recent_ops[1]:
-        loop_block = f"⛔ BLOCKED: {recent_ops[0]} used twice. Choosing it again is WRONG. Pick something else.\n"
+        stuck_tool = recent_ops[0]
+        alt = TOOL_SWITCH.get(stuck_tool, "a completely different tool")
+        loop_block = f"FORBIDDEN: {stuck_tool} used twice. You MUST use: {alt}\n"
+
+    trigger_block = ""
+    if state_trigger:
+        trigger_block = f"\nNEXT STEP: {state_trigger}\n"
 
     return (
         "You are an e-commerce agent. Pick the best NEXT tool.\n\n"
-
         f"{TOOL_CATALOG}\n\n"
-
-        f"{few_shot}\n\n"
-
+        f"{FEW_SHOT}\n\n"
         f"--- YOUR TASK ---\n"
         f"objective: {obs.task_objective}\n"
         f"customer: {obs.customer_query}\n"
@@ -264,17 +286,17 @@ def build_prompt(obs: EcommerceObservation, history: List[str], rewards: List[fl
         f"state: {state}\n"
         f"outcome: {obs.last_action_outcome}\n"
         f"{reward_line}"
-        f"{loop_block}\n"
-
+        f"{loop_block}"
+        f"{trigger_block}\n"
         f"History:\n{history_str}\n\n"
-
         "Think:\n"
         "1. What does the customer need?\n"
         "2. What is still missing?\n"
         "3. Which ONE tool fixes it?\n\n"
-
         "STRICT RULES:\n"
-        "- If you repeat the same tool twice in a row, your answer is WRONG.\n"
+        "- FORBIDDEN: repeating the same tool twice in a row.\n"
+        "- If products are already known, do NOT search_catalog again.\n"
+        "- If reward was low, you MUST switch to a different TYPE of tool.\n"
         "- Never say 'fraud' or 'risk' to the customer.\n"
         "- Use null for unused fields."
     )
