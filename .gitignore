@@ -19,7 +19,3 @@ client.py
 **.arrow
 SFT_dataset_generation.py
 .venv
-.env
-.venv/
-__pycache__/
-.ipynb_checkpoints/
