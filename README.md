@@ -36,7 +36,7 @@ tags:
 | 🧠 **Trained Model (HF Hub)** | [huggingface.co/Jugal15/ecommerce-agent-grpo-v2](https://huggingface.co/Jugal15/ecommerce-agent-grpo-v2) |
 | 📊 **Training Dataset (HF Hub)** | [huggingface.co/datasets/Jugal15/ecommerce-grpo-dataset](https://huggingface.co/datasets/Jugal15/ecommerce-grpo-dataset) |
 | 📹 **Demo Video** | [youtu.be/KKLH2vjwC_c](https://youtu.be/KKLH2vjwC_c?si=DMlBPMwC4hRiHLYA) |
-| 📓 **Colab Notebook** | [Open in Colab](https://colab.research.google.com/github/Jugal-lachhwani/OpenENV_Ecommerence_User_Interaction_Agent_Environment/blob/main/ecommerce_agent_training.ipynb) |
+| 📓 **Colab Notebook** | [Open in Colab](https://colab.research.google.com/drive/1HM9KU1cVEjtl61wvbHQY5ynyE58qv572?usp=sharing) |
 
 ---
 
