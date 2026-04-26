@@ -57,6 +57,22 @@ app = create_app(
 )
 
 
+@app.get("/")
+def root_status():
+    """Simple root endpoint for hosting platform probes."""
+    return {
+        "status": "ok",
+        "service": "ecommerce_customer_interaction_env",
+        "docs": "/docs",
+    }
+
+
+@app.get("/health")
+def health_status():
+    """Health check endpoint for load balancers and uptime checks."""
+    return {"status": "healthy"}
+
+
 def main(host: str = "0.0.0.0", port: int = 8000):
     """
     Entry point for direct execution via uv run or python -m.
