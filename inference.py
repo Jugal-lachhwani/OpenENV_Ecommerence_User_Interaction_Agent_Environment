@@ -1,12 +1,12 @@
 """Inference runner for ecommerce-customer-interaction-env.
 
-Uses NVIDIA NIM (OpenAI-compatible API) with strict JSON output validation
-to generate actions for the environment.
+Uses LangChain ChatOllama with structured output to guarantee valid JSON
+from small local models (llama3.1:8b) that cannot reliably format JSON on
+their own.
 
 Optional env vars:
-- MODEL_NAME     (default: meta/llama-3.2-3b-instruct)
-- NIM_BASE_URL   (default: https://integrate.api.nvidia.com/v1)
-- ENV_BASE_URL   (default: http://localhost:8001)
+- MODEL_NAME  (default: llama3.1:8b)
+- ENV_BASE_URL (default: http://localhost:8001)
 - BENCHMARK_NAME
 """
 
@@ -24,8 +24,8 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, ValidationError
-from openai import AsyncOpenAI
+from pydantic import BaseModel, Field
+from langchain_ollama import ChatOllama
 
 from models import EcommerceAction, EcommerceObservation
 from client import MyEnv
@@ -50,9 +50,8 @@ def _load_dotenv_if_present() -> None:
 _load_dotenv_if_present()
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-MODEL_NAME   = os.getenv("MODEL_NAME",    "meta/llama-3.2-3b-instruct")
-NIM_BASE_URL = os.getenv("NIM_BASE_URL",  "https://integrate.api.nvidia.com/v1")
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY")
+MODEL_NAME   = os.getenv("MODEL_NAME",    "llama3.1:8b")
+OLLAMA_HOST  = os.getenv("OLLAMA_HOST",   "http://localhost:11434")
 ENV_BASE_URL = os.getenv("ENV_BASE_URL",  "http://localhost:8001")
 LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 BENCHMARK_NAME   = os.getenv("BENCHMARK_NAME", "ecommerce_customer_interaction_env")
@@ -305,49 +304,20 @@ def build_prompt(obs: EcommerceObservation, history: List[str], rewards: List[fl
 
 # ── LLM call with structured output ────────────────────────────────────────────
 async def llm_action(
-    nim_client: AsyncOpenAI,
+    llm_structured,          # ChatOllama instance bound with .with_structured_output()
     obs: EcommerceObservation,
     history: List[str],
     rewards: List[float],
 ) -> tuple[Optional[Dict[str, object]], Optional[str]]:
     """
-    Calls NVIDIA NIM using OpenAI-compatible chat completions.
-    The response is validated against ActionSchema to enforce output shape.
+    Calls ChatOllama with structured output.
+    The model is FORCED to return a JSON object matching ActionSchema —
+    LangChain/Ollama enforces this at the API level, no manual parsing needed.
     """
     prompt = build_prompt(obs, history, rewards)
     try:
-        completion = await nim_client.chat.completions.create(
-            model=MODEL_NAME,
-            temperature=0.3,
-            max_tokens=512,
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an e-commerce support agent. "
-                        "Return ONLY a single valid JSON object that matches the required schema."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-        )
-
-        content = (completion.choices[0].message.content or "").strip()
-        if not content:
-            return None, "llm_empty_response"
-
-        try:
-            parsed = ActionSchema.model_validate_json(content)
-        except ValidationError:
-            # Some providers may wrap JSON in extra text even with json_object mode.
-            start = content.find("{")
-            end = content.rfind("}")
-            if start == -1 or end == -1 or end <= start:
-                return None, "llm_non_json_response"
-            parsed = ActionSchema.model_validate_json(content[start : end + 1])
-
-        return parsed.model_dump(), None
+        result: ActionSchema = await llm_structured.ainvoke(prompt)
+        return result.model_dump(), None
     except Exception as exc:
         return None, f"llm_request_failed:{type(exc).__name__}:{exc}"
 
@@ -372,7 +342,7 @@ def normalize_action(raw: Dict[str, object], task_id: str) -> EcommerceAction:
 
 
 # ── Task runner ─────────────────────────────────────────────────────────────────
-async def run_task(env: MyEnv, nim_client: AsyncOpenAI) -> EpisodeResult:
+async def run_task(env: MyEnv, llm_structured) -> EpisodeResult:
     result = await env.reset()
     task_id = result.observation.task_id
     rewards: List[float] = []
@@ -383,7 +353,7 @@ async def run_task(env: MyEnv, nim_client: AsyncOpenAI) -> EpisodeResult:
     log_start(task=task_id, env=BENCHMARK_NAME, model=MODEL_NAME)
 
     for step in range(1, MAX_STEPS_PER_TASK + 1):
-        raw, llm_error = await llm_action(nim_client, result.observation, history, rewards)
+        raw, llm_error = await llm_action(llm_structured, result.observation, history, rewards)
 
         if raw is None:
             # Structured output failed — send a safe dummy action and log it
@@ -439,17 +409,19 @@ async def run_task(env: MyEnv, nim_client: AsyncOpenAI) -> EpisodeResult:
 
 # ── Main ────────────────────────────────────────────────────────────────────────
 async def main() -> None:
-    if not NVIDIA_API_KEY:
-        raise RuntimeError("NVIDIA_API_KEY is not set. Add it to your .env file.")
-
-    print(f"\n🤖 Model : {MODEL_NAME} (via NVIDIA NIM at {NIM_BASE_URL})")
+    print(f"\n🤖 Model : {MODEL_NAME} (via Ollama at {OLLAMA_HOST})")
     print(f"🌐 Env   : {ENV_BASE_URL}")
-    print("🔒 JSON  : enforced with response_format=json_object + Pydantic validation\n")
+    print(f"🔒 JSON  : enforced by LangChain structured output (no parsing failures)\n")
 
-    nim_client = AsyncOpenAI(
-        api_key=NVIDIA_API_KEY,
-        base_url=NIM_BASE_URL,
+    # Build the ChatOllama chain with structured output.
+    # Ollama uses JSON schema mode internally — the model cannot deviate.
+    base_llm = ChatOllama(
+        model=MODEL_NAME,
+        base_url=OLLAMA_HOST,
+        temperature=0.3,        # Slightly higher temperature to prevent loops
+        num_predict=512,        # More tokens needed for reasoning/thought field
     )
+    llm_structured = base_llm.with_structured_output(ActionSchema)
 
     env = (
         await MyEnv.from_docker_image(LOCAL_IMAGE_NAME)
@@ -460,7 +432,7 @@ async def main() -> None:
         results = []
         for i in range(6):
             print(f"\n--- Episode {i+1}/6 ---")
-            results.append(await run_task(env, nim_client))
+            results.append(await run_task(env, llm_structured))
     finally:
         await env.close()
 

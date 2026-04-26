@@ -11,6 +11,8 @@ pydantic>=2.0.0
 # ── Inference (inference2.py / inference3.py) — LangChain + Ollama ───────────
 langchain-ollama>=0.2.0        # ChatOllama with structured output
 langchain-core>=0.3.0          # BaseMessage, Runnable, etc. (transitive, pinned)
+langchain-openai>=0.2.0        # ChatOpenAI for NVIDIA NIM (OpenAI-compatible)
+langchain-huggingface>=0.1.0   # ChatHuggingFace + HuggingFaceEndpoint
 
 # ── Inference (inference.py / inference3.py) — OpenAI-compatible backends ────
 openai>=1.35.0

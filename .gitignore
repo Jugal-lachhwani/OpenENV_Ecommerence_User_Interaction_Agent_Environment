@@ -5,7 +5,6 @@ __pycache__
 .history
 **.log
 **node_modules
-**.md
 **.ipynb
 docs
 *.pyc
