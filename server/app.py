@@ -35,10 +35,14 @@ except Exception as e:  # pragma: no cover
         "openenv is required for the web interface. Install dependencies with '\n    uv sync\n'"
     ) from e
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 try:
     from ..models import EcommerceAction, EcommerceObservation
     from .my_env_environment import EcommerceCustomerInteractionEnvironment
-except (ModuleNotFoundError, ImportError):
+except (ModuleNotFoundError, ImportError, ValueError):
     from models import EcommerceAction, EcommerceObservation
     from server.my_env_environment import EcommerceCustomerInteractionEnvironment
 
